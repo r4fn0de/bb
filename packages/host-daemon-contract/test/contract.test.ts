@@ -1023,11 +1023,11 @@ describe("host-daemon local schemas", () => {
 });
 
 describe("host-daemon command schemas", () => {
-  // Provider usage gained Claude model-scoped windows and duration-aware Codex
-  // labels in version 71. Older daemons omit or mislabel them, so the bump
-  // forces an update before the server requests provider usage.
-  it("uses protocol version 71 for provider usage normalization", () => {
-    expect(HOST_DAEMON_PROTOCOL_VERSION).toBe(71);
+  // Provider usage gained model-scoped/duration-aware windows while provider
+  // runtimes also gained structured account rate-limit events. Version 72
+  // keeps both changes incompatible with daemons that only implement one.
+  it("uses protocol version 72 for provider usage and rate-limit events", () => {
+    expect(HOST_DAEMON_PROTOCOL_VERSION).toBe(72);
   });
 
   it("binds Plan cancellation to a required turn id and typed result", () => {
