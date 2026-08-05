@@ -123,12 +123,30 @@ async function readDesktopPackageVersion() {
   return packageJson.version;
 }
 
+// electron-builder unpacks the x64 build to "mac/" and the arm64 build to
+// "mac-arm64/". Try the directory matching the host architecture first so the
+// smoke test exercises the binary this machine can actually run even when a
+// dual-arch build wrote both, then fall back to any other build directory.
+const hostOutputDirectoryNames =
+  process.arch === "arm64" ? ["mac-arm64", "mac"] : ["mac", "mac-arm64"];
+
+function orderMacOutputDirectoriesFirstByHost(directoryNames) {
+  return [
+    ...hostOutputDirectoryNames.filter((name) => directoryNames.includes(name)),
+    ...directoryNames.filter(
+      (name) => !hostOutputDirectoryNames.includes(name),
+    ),
+  ];
+}
+
 async function resolvePackagedAppBinary() {
   const entries = await readdir(releaseDir, { withFileTypes: true });
-  const macOutputDirectories = entries
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith("mac"))
-    .map((entry) => entry.name)
-    .sort();
+  const macOutputDirectories = orderMacOutputDirectoriesFirstByHost(
+    entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith("mac"))
+      .map((entry) => entry.name)
+      .sort(),
+  );
 
   for (const directory of macOutputDirectories) {
     const appBinary = join(releaseDir, directory, appBinaryRelativePath);

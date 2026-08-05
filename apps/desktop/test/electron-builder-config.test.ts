@@ -238,10 +238,7 @@ describe("electron-builder signing config", () => {
     );
 
     expect(Object.keys(packageJson.optionalDependencies ?? {})).not.toEqual(
-      expect.arrayContaining([
-        "@esbuild/darwin-arm64",
-        "@esbuild/darwin-x64",
-      ]),
+      expect.arrayContaining(["@esbuild/darwin-arm64", "@esbuild/darwin-x64"]),
     );
   });
 
@@ -283,6 +280,28 @@ describe("electron-builder signing config", () => {
       cpu: ["arm64", "x64"],
       os: ["current"],
     });
+  });
+
+  it("builds macOS dmg and zip for both arm64 and x64", async () => {
+    const configText = await readFile(
+      resolve(desktopPackageRoot, "electron-builder.config.json"),
+      "utf8",
+    );
+    const config = electronBuilderConfigSchema.parse(JSON.parse(configText));
+    const macTargets = config.mac.target as Array<{
+      target: string;
+      arch?: string[];
+    }>;
+
+    expect(macTargets).toBeDefined();
+    expect(macTargets.find((target) => target.target === "dmg")?.arch).toEqual([
+      "arm64",
+      "x64",
+    ]);
+    expect(macTargets.find((target) => target.target === "zip")?.arch).toEqual([
+      "arm64",
+      "x64",
+    ]);
   });
 
   it("disables in-place native rebuilds so the shared pnpm store is not mutated", async () => {

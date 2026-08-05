@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   macos:
-    name: macOS arm64 desktop artifacts
+    name: macOS arm64 and x64 desktop artifacts
     runs-on: macos-15
     timeout-minutes: 45
 
@@ -103,7 +103,7 @@ jobs:
             exit 1
           fi
 
-      - name: Package arm64 desktop artifacts
+      - name: Package arm64 and x64 desktop artifacts
         env:
           CSC_LINK: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -166,7 +166,7 @@ jobs:
       - name: Upload desktop workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: bb-desktop-macos-arm64
+          name: bb-desktop-macos
           path: |
             apps/desktop/release/*.dmg
             apps/desktop/release/*.zip
@@ -250,7 +250,7 @@ jobs:
           {
             echo "## bb desktop artifacts"
             echo
-            echo "- arm64 macOS .dmg, .zip, latest-mac.yml, and desktop-version.json uploaded as workflow artifacts"
+            echo "- arm64 and x64 (Intel) macOS .dmg, .zip, latest-mac.yml, and desktop-version.json uploaded as workflow artifacts"
             echo "- version: ${VERSION}"
             echo "- prerelease version: ${IS_PRERELEASE}"
             echo "- stable release publication requested and allowed: ${SHOULD_PUBLISH}"

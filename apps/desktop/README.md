@@ -72,15 +72,17 @@ pnpm exec turbo run desktop:build --filter=@bb/desktop
 pnpm exec turbo run smoke:packaged --filter=@bb/desktop
 ```
 
-Artifacts are written under `apps/desktop/release/`. The desktop build is
-macOS-only and Apple Silicon arm64-only. Without signing secrets, local builds
-sign with a code-signing identity auto-discovered from the keychain and skip
-notarization. A valid signature matters even for local builds: macOS
-provenance-tracks unsigned apps, forcing syspolicyd to evaluate every exec in
-the app's process tree, which can stall process launches system-wide. On
-machines with no keychain identity (or with `CSC_IDENTITY_AUTO_DISCOVERY=false`,
-as CI sets for workflow-artifact-only builds), artifacts remain unsigned and
-macOS shows the normal Gatekeeper warning on first launch.
+Artifacts are written under `apps/desktop/release/`. The desktop build targets
+macOS on both Apple Silicon (arm64) and Intel (x64): `desktop:build` packages
+`.dmg` / `.zip` artifacts for both architectures, and the local `package` task
+builds the host architecture. Without signing secrets, local builds sign with a
+code-signing identity auto-discovered from the keychain and skip notarization.
+A valid signature matters even for local builds: macOS provenance-tracks
+unsigned apps, forcing syspolicyd to evaluate every exec in the app's process
+tree, which can stall process launches system-wide. On machines with no
+keychain identity (or with `CSC_IDENTITY_AUTO_DISCOVERY=false`, as CI sets for
+workflow-artifact-only builds), artifacts remain unsigned and macOS shows the
+normal Gatekeeper warning on first launch.
 
 ## Releasing
 
@@ -173,7 +175,9 @@ produce unsigned or signed-but-not-notarized artifacts.
 
 The renderer update toast keeps using `desktop-version.json` as the lightweight
 feature surface. The installer path uses `electron-updater` against the same
-`desktop-latest` release asset directory and reads `latest-mac.yml`. These
+`desktop-latest` release asset directory and reads `latest-mac.yml`. That file
+lists the `.zip` for both architectures; `electron-updater` selects the archive
+matching the host (arm64 vs x64), proxying the native Squirrel.Mac path. These
 checks run in parallel on launch, hourly, and when the app becomes active: the
 JSON feed can show "update available" even when CI has published metadata only,
 while the Electron updater only flips the toast to "ready to install" after a
@@ -200,6 +204,9 @@ Use the View menu to toggle DevTools. To open them automatically on launch, set
 ```bash
 BB_DESKTOP_OPEN_DEVTOOLS=1 apps/desktop/release/mac-arm64/bb.app/Contents/MacOS/bb
 ```
+
+On an Intel (x64) build, use the `release/mac/` output directory instead of
+`release/mac-arm64/`.
 
 When the desktop app spawns `bb-app`, server and daemon logs land under
 `~/.bb/logs/` or `$BB_DATA_DIR/logs/` when `BB_DATA_DIR` is set.
