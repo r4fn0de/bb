@@ -1,0 +1,19 @@
+README.md
+  s_f1c4cc1ddcdf15::t_26adf44656f840 37-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "161af55110d1961965b1a0cd12b67c0bc9269701",
+  "prompts": {},
+  "sessions": {
+    "s_f1c4cc1ddcdf15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ses_02c4d6522ffe2jp8E40x7gtmbj",
+        "model": "unknown"
+      },
+      "human_author": "Rafael Porto <rafaelporto45rt5@proton.me>"
+    }
+  }
+}
