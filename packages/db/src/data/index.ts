@@ -303,6 +303,7 @@ export {
   getLatestThreadOutputEventRow,
   getLatestThreadSystemErrorEventRow,
   getLatestThreadSequence,
+  getLatestStoredEventRowByType,
   insertEvents,
   listActiveBackgroundTaskCountsByThreadIds,
   listContextWindowUsageRows,

@@ -47,6 +47,8 @@ import type {
   CloseTerminalRequest,
   CommandListResponse,
   CopyProjectAttachmentsRequest,
+  ContinueAfterProviderRateLimitRequest,
+  ContinueAfterProviderRateLimitResponse,
   CreateHostJoinCodeRequest,
   CreateHostJoinCodeResponse,
   CreateTerminalRequest,
@@ -176,6 +178,7 @@ import type {
   ThreadOpenResponse,
   ThreadPaneActionRequest,
   ThreadPaneActionResponse,
+  ProviderRateLimitRecoveryStatus,
   ThreadPendingInteractionsResponse,
   ThreadQueuedMessageListResponse,
   ThreadResponse,
@@ -212,6 +215,7 @@ import { updateThreadTabsRequestSchema } from "./api/thread-tabs.js";
 import {
   closeTerminalRequestSchema,
   copyProjectAttachmentsRequestSchema,
+  continueAfterProviderRateLimitRequestSchema,
   createFilePreviewRequestSchema,
   createThreadSectionRequestSchema,
   deleteThreadSectionRequestSchema,
@@ -955,6 +959,20 @@ export const publicApiRoutes = {
         sendMessageRequestSchema,
       ),
       response: jsonResponse<{ ok: true }>(),
+    }),
+    rateLimitRecovery: defineRoute({
+      path: "/threads/:id/rate-limit-recovery",
+      method: "get",
+      request: noRequest<PathId>(),
+      response: jsonResponse<ProviderRateLimitRecoveryStatus>(),
+    }),
+    continueAfterRateLimit: defineRoute({
+      path: "/threads/:id/rate-limit-recovery/continue",
+      method: "post",
+      request: jsonRequest<PathId, ContinueAfterProviderRateLimitRequest>(
+        continueAfterProviderRateLimitRequestSchema,
+      ),
+      response: jsonResponse<ContinueAfterProviderRateLimitResponse>(),
     }),
     /** @deprecated App code uses dedicated composer queries. */
     composerBootstrap: defineRoute({
