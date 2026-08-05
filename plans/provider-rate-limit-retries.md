@@ -15,7 +15,7 @@ Implementation date: 2026-08-05
   output or possible side effects, no provider-owned retry, and no newer
   request. The new turn uses the same provider conversation and execution
   settings with one agent-only `Please continue.` input.
-- The default-enabled builtin Provider retry plugin owns the v1 in-memory
+- The opt-in builtin Provider retry plugin owns the v1 in-memory
   scheduler. It coordinates one timer per machine/provider account scope,
   buffers and jitters reported resets, serializes releases, reschedules changed
   resets, releases early after allowed telemetry or live usage refresh, waits
@@ -35,7 +35,7 @@ Version one is optimized for the common five-hour window. It preserves the provi
 
 ## Recommendation
 
-Build an auto-installed, default-enabled `plugins/provider-retry` built-in plugin, supported by two small core capabilities:
+Build an auto-installed, default-disabled `plugins/provider-retry` built-in plugin, supported by two small core capabilities:
 
 1. A normalized provider subscription-limit state that retains window type, reset time, exhaustion reason, overage state, and an opaque subscription/account scope.
 2. A narrow server-owned continuation operation that starts a new system-authored turn on the same provider thread after a safe rate-limit failure, without adding a visible user message or resending the original prompt.
@@ -258,7 +258,7 @@ The route accepts no replacement input. It is a guarded system continuation, not
 
 ## Built-In Plugin State (In Memory for v1)
 
-Register `plugins/provider-retry` in the [built-in registry](../apps/server/src/services/plugins/builtin-registry.ts) with `autoInstall: true` and `defaultEnabled: true`.
+Register `plugins/provider-retry` in the [built-in registry](../apps/server/src/services/plugins/builtin-registry.ts) with `autoInstall: true` and `defaultEnabled: false`. Users enable it explicitly under Extensions → Plugins or with `bb plugin enable provider-retry`.
 
 Keep the minimal live state in maps owned by the plugin service:
 
