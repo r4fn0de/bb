@@ -49,6 +49,7 @@ import {
   getSkillDetailRoutePath,
 } from "./lib/route-paths";
 import { AppCommandProvider } from "./components/commands/AppCommandProvider";
+import { OnboardingHost } from "@/components/onboarding/OnboardingHost";
 import { ProviderCliInstallLogDialogHost } from "./components/provider-cli/provider-cli-install";
 import { ToolsExperimentGate } from "./components/tools/ToolsExperimentGate";
 import { PluginSettingsCompatibilityRoute } from "./components/settings/PluginSettingsCompatibilityRoute";
@@ -125,6 +126,10 @@ export function LegacySkillDetailRedirect() {
 }
 
 export function ExtensionsLandingRedirect() {
+  return <Navigate to={TOOLS_PLUGINS_ROUTE_PATH} replace />;
+}
+
+export function LegacyPluginBrowseRedirect() {
   return <Navigate to={TOOLS_PLUGINS_ROUTE_PATH} replace />;
 }
 
@@ -223,12 +228,7 @@ function AppRoutes() {
             <Route path={TOOLS_PLUGINS_ROUTE_PATH} element={<ToolsView />} />
             <Route
               path={TOOLS_PLUGIN_BROWSE_ROUTE_PATH}
-              element={
-                <Navigate
-                  to={`${TOOLS_PLUGINS_ROUTE_PATH}?view=browse`}
-                  replace
-                />
-              }
+              element={<LegacyPluginBrowseRedirect />}
             />
             <Route
               path={TOOLS_PLUGIN_DETAIL_ROUTE_PATH}
@@ -275,6 +275,9 @@ export function App() {
               started it, so its failure toast can be clicked from any route —
               including auth callback, which renders no app shell. */}
           <ProviderCliInstallLogDialogHost />
+          {/* First-run onboarding. Outside <Routes> so it is not tied to a
+              page. It self-gates on the experiment and completion timestamp. */}
+          <OnboardingHost />
         </RouteNavigationProvider>
       </AppCommandProvider>
     </QuickCreateProjectProvider>

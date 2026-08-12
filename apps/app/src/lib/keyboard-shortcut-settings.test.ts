@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { APP_COMMAND_IDS, type AppKeybindings } from "@bb/domain";
+import {
+  APP_COMMAND_IDS,
+  type AppDefaultKeybindings,
+  type AppKeybindings,
+} from "@bb/domain";
 import { getAppCommandMetadata } from "./app-command-metadata";
 import {
   appShortcutFromInput,
   canAssignAppShortcut,
   getCommandShortcut,
+  resetCommandShortcutOverride,
   setCommandShortcutOverride,
 } from "./keyboard-shortcut-settings";
 
@@ -49,6 +54,7 @@ describe("keyboard shortcut settings", () => {
       appShortcutFromInput(
         {
           key: "{",
+          code: "BracketLeft",
           metaKey: true,
           ctrlKey: false,
           altKey: false,
@@ -66,11 +72,31 @@ describe("keyboard shortcut settings", () => {
     });
   });
 
+  // Recording must agree with matching: macOS reports Option+M as "µ", so the
+  // recorder has to store the physical key or the captured chord would never
+  // fire again.
+  it("records an alt chord by its physical key", () => {
+    expect(
+      appShortcutFromInput(
+        {
+          key: "µ",
+          code: "KeyM",
+          metaKey: false,
+          ctrlKey: false,
+          altKey: true,
+          shiftKey: false,
+        },
+        "MacIntel",
+      ),
+    ).toMatchObject({ key: "m", alt: true, mod: false, shift: false });
+  });
+
   it("preserves explicit non-primary modifiers", () => {
     expect(
       appShortcutFromInput(
         {
           key: "K",
+          code: "KeyK",
           metaKey: true,
           ctrlKey: true,
           altKey: false,
@@ -121,6 +147,38 @@ describe("keyboard shortcut settings", () => {
         "Win32",
       ),
     ).toEqual([]);
+  });
+
+  it("assigns and resets a command without a default shortcut", () => {
+    const unassignedDefaults: AppDefaultKeybindings = [
+      {
+        command: "thread.rename",
+        desktopOnly: false,
+        shortcut: null,
+        when: { all: ["mainSurface"], none: ["modalOpen"] },
+      },
+    ];
+    const shortcut = defaults[0]!.shortcut;
+    const assigned = setCommandShortcutOverride(
+      unassignedDefaults,
+      [],
+      "thread.rename",
+      shortcut,
+      false,
+      "Win32",
+    );
+
+    expect(assigned).toEqual([{ command: "thread.rename", shortcut }]);
+    expect(
+      getCommandShortcut(
+        unassignedDefaults,
+        assigned,
+        "thread.rename",
+        false,
+        "Win32",
+      ),
+    ).toEqual(shortcut);
+    expect(resetCommandShortcutOverride(assigned, "thread.rename")).toEqual([]);
   });
 
   it("selects the active default for the current app surface", () => {

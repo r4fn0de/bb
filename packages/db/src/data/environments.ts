@@ -57,6 +57,7 @@ export function createEnvironment(
       mergeBaseBranch: input.mergeBaseBranch ?? null,
       workspaceProvisionType: input.workspaceProvisionType,
       status: input.status ?? "provisioning",
+      retireRequestedAt: input.status === "retiring" ? now : null,
       createdAt: now,
       updatedAt: now,
     })
@@ -72,8 +73,9 @@ export function getEnvironment(db: EnvironmentReadConnection, id: string) {
   );
 }
 
-export function findEnvironmentByHostPath(
+export function findProjectEnvironmentByHostPath(
   db: DbConnection,
+  projectId: string,
   hostId: string,
   path: string,
 ) {
@@ -81,7 +83,46 @@ export function findEnvironmentByHostPath(
     db
       .select()
       .from(environments)
-      .where(and(eq(environments.hostId, hostId), eq(environments.path, path)))
+      .where(
+        and(
+          eq(environments.projectId, projectId),
+          eq(environments.hostId, hostId),
+          eq(environments.path, path),
+        ),
+      )
+      .get() ?? null
+  );
+}
+
+export interface FindForeignManagedEnvironmentAtHostPathArgs {
+  hostId: string;
+  path: string;
+  projectId: string;
+}
+
+/**
+ * A live bb-managed workspace at this directory owned by another project.
+ * The environment claim is project-scoped, but the directory is physical:
+ * destroying a managed environment deletes it, so no other project may attach
+ * to it in place.
+ */
+export function findForeignManagedEnvironmentAtHostPath(
+  db: DbConnection,
+  args: FindForeignManagedEnvironmentAtHostPathArgs,
+) {
+  return (
+    db
+      .select()
+      .from(environments)
+      .where(
+        and(
+          eq(environments.hostId, args.hostId),
+          eq(environments.path, args.path),
+          eq(environments.managed, true),
+          ne(environments.projectId, args.projectId),
+          ne(environments.status, "destroyed"),
+        ),
+      )
       .get() ?? null
   );
 }
@@ -394,18 +435,35 @@ function applyEnvironmentLifecycleEventRecord(
     };
   }
 
+  const now = Date.now();
   const set: Partial<typeof environments.$inferInsert> = {
     status: evaluation.to,
-    updatedAt: Date.now(),
+    updatedAt: now,
   };
+  if (args.event.type === "retire.requested") {
+    set.retireRequestedAt = now;
+  } else if (
+    evaluation.to === "ready" ||
+    evaluation.to === "provisioning" ||
+    evaluation.to === "destroyed"
+  ) {
+    set.retireRequestedAt = null;
+  }
   if (args.event.type === "destroy.started") {
     set.destroyAttemptId = args.event.destroyAttemptId;
   }
-  if (args.event.type === "destroy.failed" || args.event.type === "destroy.lost") {
+  if (
+    args.event.type === "destroy.failed" ||
+    evaluation.to === "ready" ||
+    evaluation.to === "provisioning"
+  ) {
     set.destroyAttemptId = null;
   }
   if (evaluation.to === "destroyed") {
     set.destroyAttemptId = null;
+    // The workspace no longer exists. Release its path claim and avoid
+    // retaining stale host-local filesystem data on the terminal row.
+    set.path = null;
   }
 
   // Compare-and-set on the loaded status: belt-and-braces under

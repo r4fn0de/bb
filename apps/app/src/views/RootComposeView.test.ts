@@ -27,6 +27,7 @@ import {
   readRootComposeSectionTargetFromLocationState,
   readInitialPromptFromLocationState,
   requestRootComposePluginFocus,
+  resolveRootComposeProjectDefaultsState,
   restorePromptDraftAfterOptionChange,
   resolveRootComposePanelThreadId,
   shouldReplaceInitialPromptFromLocationState,
@@ -34,7 +35,7 @@ import {
   shouldNavigateAfterThreadCreate,
 } from "./RootComposeView";
 import {
-  isProjectSourceWorktreeUnavailable,
+  resolveProjectSourceWorktreeDisabledReason,
   resolveComposeHostId,
   resolveRootComposeEffectiveEnvironmentValue,
   resolveRootComposeProjectRouting,
@@ -55,6 +56,68 @@ describe("requestRootComposePluginFocus", () => {
 
     expect(focusRequests).toBe(1);
     unsubscribe();
+  });
+});
+
+describe("resolveRootComposeProjectDefaultsState", () => {
+  const storedDefaults = {
+    providerId: "codex",
+    model: "gpt-5.6-sol",
+    serviceTier: "default" as const,
+    reasoningLevel: "medium" as const,
+    permissionMode: "auto" as const,
+  };
+
+  it("keeps optimistic null defaults unresolved while the fallback query is pending", () => {
+    expect(
+      resolveRootComposeProjectDefaultsState({
+        cachedDefaults: null,
+        projectFound: true,
+        queryData: undefined,
+        queryIsError: false,
+        queryIsPlaceholderData: false,
+        queryIsSuccess: false,
+      }),
+    ).toEqual({ status: "pending" });
+  });
+
+  it("uses the authoritative saved defaults when the delayed query resolves", () => {
+    expect(
+      resolveRootComposeProjectDefaultsState({
+        cachedDefaults: null,
+        projectFound: true,
+        queryData: storedDefaults,
+        queryIsError: false,
+        queryIsPlaceholderData: false,
+        queryIsSuccess: true,
+      }),
+    ).toEqual({ status: "resolved", defaults: storedDefaults });
+  });
+
+  it("only confirms absence after the fallback query succeeds with null", () => {
+    expect(
+      resolveRootComposeProjectDefaultsState({
+        cachedDefaults: null,
+        projectFound: true,
+        queryData: null,
+        queryIsError: false,
+        queryIsPlaceholderData: false,
+        queryIsSuccess: true,
+      }),
+    ).toEqual({ status: "resolved", defaults: null });
+  });
+
+  it("does not treat a previous project's placeholder as authoritative", () => {
+    expect(
+      resolveRootComposeProjectDefaultsState({
+        cachedDefaults: null,
+        projectFound: true,
+        queryData: storedDefaults,
+        queryIsError: false,
+        queryIsPlaceholderData: true,
+        queryIsSuccess: true,
+      }),
+    ).toEqual({ status: "pending" });
   });
 });
 
@@ -639,14 +702,16 @@ describe("shouldNavigateAfterThreadCreate", () => {
   });
 });
 
-describe("isProjectSourceWorktreeUnavailable", () => {
-  it("treats unknown checkout metadata as unavailable for worktree creation", () => {
-    expect(isProjectSourceWorktreeUnavailable(undefined)).toBe(false);
+describe("resolveProjectSourceWorktreeDisabledReason", () => {
+  it("explains why non-git and commitless sources cannot create worktrees", () => {
+    expect(resolveProjectSourceWorktreeDisabledReason(undefined)).toBeNull();
     expect(
-      isProjectSourceWorktreeUnavailable(makeProjectBranchesResponse({})),
-    ).toBe(false);
+      resolveProjectSourceWorktreeDisabledReason(
+        makeProjectBranchesResponse({}),
+      ),
+    ).toBeNull();
     expect(
-      isProjectSourceWorktreeUnavailable(
+      resolveProjectSourceWorktreeDisabledReason(
         makeProjectBranchesResponse({
           checkout: {
             kind: "unknown",
@@ -658,7 +723,20 @@ describe("isProjectSourceWorktreeUnavailable", () => {
           originDefaultBranch: null,
         }),
       ),
-    ).toBe(true);
+    ).toBe("New worktrees require a Git repository with at least one commit");
+    expect(
+      resolveProjectSourceWorktreeDisabledReason(
+        makeProjectBranchesResponse({
+          checkout: { kind: "unborn", branchName: "main" },
+          defaultBranch: null,
+          defaultBranchRelation: null,
+          defaultWorktreeBaseBranch: null,
+          originDefaultBranch: null,
+        }),
+      ),
+    ).toBe(
+      "Project source has no commits. Create an initial commit before creating a worktree",
+    );
   });
 });
 

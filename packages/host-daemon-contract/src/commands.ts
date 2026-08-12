@@ -20,6 +20,7 @@ import {
   clientTurnRequestIdSchema,
   gitBranchNameSchema,
   jsonObjectSchema,
+  providerNativeSkillRootsSchema,
   BRANCH_LIST_LIMIT_MAX,
   BRANCH_LIST_QUERY_MAX_LENGTH,
   FILE_LIST_LIMIT_MAX,
@@ -35,7 +36,7 @@ import {
   providerCliStatusResponseSchema,
 } from "./local.js";
 
-export const HOST_DAEMON_PROTOCOL_VERSION = 72 as const;
+export const HOST_DAEMON_PROTOCOL_VERSION = 108 as const;
 
 export {
   BRANCH_LIST_LIMIT_MAX,
@@ -140,6 +141,14 @@ export const hostDaemonInjectedSkillSourceSchema = z.discriminatedUnion(
         skillFilePath: z.string().min(1),
       })
       .strict(),
+    hostDaemonInjectedSkillSourceBaseSchema
+      .extend({
+        kind: z.literal("host-path"),
+        sourceType: z.enum(["shared-user", "shared-project"]),
+        sourceRootPath: z.string().min(1),
+        skillFilePath: z.string().min(1),
+      })
+      .strict(),
   ],
 );
 export type HostDaemonInjectedSkillSource = z.infer<
@@ -166,6 +175,7 @@ export const hostDaemonAcpLaunchSpecSchema = z
       .optional(),
     reasoningCli: acpReasoningCliSchema.optional(),
     nativeReasoning: acpNativeReasoningSchema.optional(),
+    nativeSkillRoots: providerNativeSkillRootsSchema.optional(),
     permissionCli: acpPermissionCliSchema.optional(),
   })
   .strict();
@@ -185,6 +195,7 @@ export function normalizeHostDaemonAcpLaunchSpec(
     modelCli,
     reasoningCli,
     nativeReasoning,
+    nativeSkillRoots,
     permissionCli,
   } = spec;
   const permissionCliHasMode =
@@ -202,6 +213,7 @@ export function normalizeHostDaemonAcpLaunchSpec(
       : {}),
     ...(reasoningCli !== undefined ? { reasoningCli } : {}),
     ...(nativeReasoning !== undefined ? { nativeReasoning } : {}),
+    ...(nativeSkillRoots !== undefined ? { nativeSkillRoots } : {}),
     ...(permissionCli !== undefined && permissionCliHasMode
       ? { permissionCli }
       : {}),
@@ -312,6 +324,24 @@ export const threadStartCommandSchema = hostDaemonThreadTargetSchema
     }
     refineGroupedInputMatchesFlatInput(value, ctx);
   });
+
+export const threadRewindPrepareCommandSchema = hostDaemonThreadTargetSchema
+  .merge(hostDaemonThreadRuntimeContextSchema)
+  .extend({
+    type: z.literal("thread.rewind.prepare"),
+    /** Server-minted per-attempt staging id; each lease owns one staged fork. */
+    leaseId: z.string().min(1),
+    sourceProviderThreadId: z.string().min(1),
+    retainThroughProviderCheckpoint: z.string().min(1),
+  })
+  .strict();
+
+export const threadRewindDiscardCommandSchema = hostDaemonThreadTargetSchema
+  .extend({
+    type: z.literal("thread.rewind.discard"),
+    leaseId: z.string().min(1),
+  })
+  .strict();
 
 export const turnSubmitTargetSchema = z.discriminatedUnion("mode", [
   z.object({
@@ -684,6 +714,7 @@ const hostListCommandsCommandSchema = z
     type: z.literal("host.list_commands"),
     providerId: z.string().min(1),
     cwd: z.string().min(1).nullable(),
+    nativeSkillRoots: providerNativeSkillRootsSchema.optional(),
   })
   .strict();
 
@@ -700,6 +731,8 @@ export const skillRootKindSchema = z.enum([
   "bb-builtin",
   "provider-project",
   "provider-user",
+  "shared-project",
+  "shared-user",
   "plugin",
 ]);
 export type SkillRootKind = z.infer<typeof skillRootKindSchema>;
@@ -726,11 +759,14 @@ export type DiscoveredSkill = z.infer<typeof discoveredSkillSchema>;
  * originating root. Same root-resolution rules as `host.list_commands`:
  * `cwd: null` skips the project roots and returns only user-home/bb scopes.
  */
-const hostListSkillsCommandSchema = z.object({
-  type: z.literal("host.list_skills"),
-  providerId: z.string().min(1),
-  cwd: z.string().min(1).nullable(),
-});
+const hostListSkillsCommandSchema = z
+  .object({
+    type: z.literal("host.list_skills"),
+    providerId: z.string().min(1),
+    cwd: z.string().min(1).nullable(),
+    nativeSkillRoots: providerNativeSkillRootsSchema.optional(),
+  })
+  .strict();
 
 /** User-owned local skill scopes that can be deleted after path confinement. */
 export const deletableSkillScopeSchema = z.enum([
@@ -740,6 +776,8 @@ export const deletableSkillScopeSchema = z.enum([
   "claude-project",
   "codex-user",
   "codex-project",
+  "cursor-user",
+  "cursor-project",
 ]);
 export type DeletableSkillScope = z.infer<typeof deletableSkillScopeSchema>;
 
@@ -870,6 +908,7 @@ const providerListModelsCommandSchema = z.object({
   type: z.literal("provider.list_models"),
   providerId: z.string().min(1),
   acpLaunchSpec: hostDaemonAcpLaunchSpecSchema.optional(),
+  cwd: z.string().min(1).optional(),
 });
 
 const knownAcpAgentExecutableQuerySchema = z
@@ -1330,6 +1369,11 @@ const threadStartResultSchema = z.object({
 const turnSubmitResultSchema = z.object({
   appliedAs: z.enum(["new-turn", "steer"]),
 });
+const threadStopResultSchema = z
+  .object({
+    providerCheckpointId: z.string().min(1).nullable(),
+  })
+  .strict();
 const emptyCommandResultSchema = z.object({});
 const projectPathResultSchema = z.object({ path: z.string().min(1) }).strict();
 const projectInspectResultSchema = projectPathResultSchema
@@ -1394,7 +1438,8 @@ export type ProviderUsageWindow = z.infer<typeof providerUsageWindowSchema>;
  * - `unauthenticated` — no local credentials (the CLI is not logged in).
  * - `expired` — credentials exist but the token expired; the CLI must refresh
  *   it (we never refresh another tool's tokens here).
- * - `error` — network/HTTP/parse failure; `message` is user-facing.
+ * - `error` — network/HTTP/parse failure; `message` is user-facing. Carries
+ *   `planLabel`/`accountEmail` when they were known locally before the call.
  */
 export const providerUsageSchema = z.discriminatedUnion("status", [
   z.object({
@@ -1406,7 +1451,17 @@ export const providerUsageSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("not_installed") }),
   z.object({ status: z.literal("unauthenticated") }),
   z.object({ status: z.literal("expired") }),
-  z.object({ status: z.literal("error"), message: z.string().min(1) }),
+  z.object({
+    status: z.literal("error"),
+    message: z.string().min(1),
+    /**
+     * Plan and account are read from local credentials *before* the usage HTTP
+     * call, so a rate limit or outage does not have to erase them. Null when the
+     * provider only learns them from the response body.
+     */
+    planLabel: z.string().min(1).nullable().default(null),
+    accountEmail: z.string().nullable().default(null),
+  }),
 ]);
 export type ProviderUsage = z.infer<typeof providerUsageSchema>;
 
@@ -1419,6 +1474,49 @@ export type ProviderUsageResponse = z.infer<typeof providerUsageResponseSchema>;
 
 const providerUsageCommandSchema = z
   .object({ type: z.literal("provider.usage") })
+  .strict();
+
+/**
+ * One candidate project found on the host. `agentSeenAt` is set when a
+ * supported coding agent has been run here (or in another checkout of the same
+ * repo); it is a ranking hint only, never the reason a repo is listed.
+ */
+export const discoveredRepoSchema = z
+  .object({
+    path: z.string().min(1),
+    name: z.string().min(1),
+    /** Last local activity, from `.git/HEAD` mtime. */
+    lastActivityAt: z.string(),
+    /** Remote URL when the repo has one; used to collapse worktrees. */
+    originUrl: z.string().nullable(),
+    /** True when a supported agent has been run here (or in a sibling checkout). */
+    agentSeen: z.boolean(),
+    /**
+     * When that last agent session was, if the source reported a time. Claude
+     * Code's history carries no timestamp, so `agentSeen` can be true while
+     * this stays null.
+     */
+    agentSeenAt: z.string().nullable(),
+  })
+  .strict();
+export type DiscoveredRepo = z.infer<typeof discoveredRepoSchema>;
+
+export const discoverReposResultSchema = z
+  .object({
+    repos: z.array(discoveredRepoSchema),
+    /** True when the walk hit its time budget and results may be partial. */
+    truncated: z.boolean(),
+  })
+  .strict();
+export type DiscoverReposResult = z.infer<typeof discoverReposResultSchema>;
+
+const discoverReposCommandSchema = z
+  .object({
+    type: z.literal("workspace.discover_repos"),
+    maxDepth: z.number().int().min(1).max(8),
+    sinceDays: z.number().int().min(1).max(3650),
+    limit: z.number().int().min(1).max(200),
+  })
   .strict();
 
 const providerCliStatusCommandSchema = z
@@ -1482,6 +1580,24 @@ function defineHostDaemonCommandDescriptor<
 }
 
 export const hostDaemonCommandRegistry = {
+  "thread.rewind.discard": defineHostDaemonCommandDescriptor({
+    type: "thread.rewind.discard",
+    schema: threadRewindDiscardCommandSchema,
+    resultSchema: emptyCommandResultSchema,
+    transport: "settled",
+    retryable: false,
+    flushEventsBeforeResult: true,
+    envLane: "read",
+  }),
+  "thread.rewind.prepare": defineHostDaemonCommandDescriptor({
+    type: "thread.rewind.prepare",
+    schema: threadRewindPrepareCommandSchema,
+    resultSchema: threadStartResultSchema,
+    transport: "settled",
+    retryable: false,
+    flushEventsBeforeResult: true,
+    envLane: "read",
+  }),
   "thread.start": defineHostDaemonCommandDescriptor({
     type: "thread.start",
     schema: threadStartCommandSchema,
@@ -1503,7 +1619,7 @@ export const hostDaemonCommandRegistry = {
   "thread.stop": defineHostDaemonCommandDescriptor({
     type: "thread.stop",
     schema: threadStopCommandSchema,
-    resultSchema: emptyCommandResultSchema,
+    resultSchema: threadStopResultSchema,
     transport: "settled",
     retryable: false,
     flushEventsBeforeResult: true,
@@ -1887,6 +2003,15 @@ export const hostDaemonCommandRegistry = {
     flushEventsBeforeResult: false,
     envLane: null,
   }),
+  "workspace.discover_repos": defineHostDaemonCommandDescriptor({
+    type: "workspace.discover_repos",
+    schema: discoverReposCommandSchema,
+    resultSchema: discoverReposResultSchema,
+    transport: "onlineRpc",
+    retryable: true,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
   "provider_cli.status": defineHostDaemonCommandDescriptor({
     type: "provider_cli.status",
     schema: providerCliStatusCommandSchema,
@@ -2013,13 +2138,6 @@ function hostDaemonCommandDescriptorsForTransport<
   );
 }
 
-function hostDaemonCommandDescriptorsForRetryableOnlineRpc(): HostDaemonRetryableOnlineRpcCommandDescriptor[] {
-  return hostDaemonCommandDescriptorsForTransport("onlineRpc").filter(
-    (descriptor): descriptor is HostDaemonRetryableOnlineRpcCommandDescriptor =>
-      descriptor.retryable,
-  );
-}
-
 function hostDaemonCommandTypesForTransport<
   const Transport extends HostDaemonCommandTransport,
 >(transport: Transport): HostDaemonCommandTypeForTransport<Transport>[] {
@@ -2041,19 +2159,6 @@ function hostDaemonCommandSchemaForTransport<
       HostDaemonSchemaForTransport<Transport>,
       HostDaemonSchemaForTransport<Transport>,
       ...HostDaemonSchemaForTransport<Transport>[],
-    ],
-  );
-}
-
-function hostDaemonRetryableOnlineRpcCommandUnionSchema(): z.ZodType<HostDaemonRetryableOnlineRpcCommand> {
-  const schemas = hostDaemonCommandDescriptorsForRetryableOnlineRpc().map(
-    (descriptor) => descriptor.schema,
-  );
-  return z.union(
-    schemas as [
-      HostDaemonRetryableOnlineRpcCommandSchema,
-      HostDaemonRetryableOnlineRpcCommandSchema,
-      ...HostDaemonRetryableOnlineRpcCommandSchema[],
     ],
   );
 }
@@ -2116,8 +2221,6 @@ export const hostDaemonCommandSchema =
   hostDaemonCommandSchemaForTransport("settled");
 export const hostDaemonOnlineRpcCommandSchema =
   hostDaemonCommandSchemaForTransport("onlineRpc");
-export const hostDaemonRetryableOnlineRpcCommandSchema =
-  hostDaemonRetryableOnlineRpcCommandUnionSchema();
 export const hostDaemonRpcCommandSchema = z.union([
   hostDaemonOnlineRpcCommandSchema,
   hostDaemonCommandSchema,

@@ -27,6 +27,7 @@ import {
   terminalOutputChunkSchema,
   terminalOutputResponseSchema,
   terminalSessionSchema,
+  terminalWebSocketQuerySchema,
   threadListResponseSchema,
   threadPendingInteractionsResponseSchema,
   timelineTurnSummaryDetailsResponseSchema,
@@ -620,6 +621,16 @@ describe("public terminal contracts", () => {
         type: "input",
         dataBase64: oversizedEncodedPayload,
       }).success,
+    ).toBe(false);
+  });
+
+  it("defaults and validates the terminal websocket replay sequence", () => {
+    expect(terminalWebSocketQuerySchema.parse({})).toEqual({ sinceSeq: 0 });
+    expect(terminalWebSocketQuerySchema.parse({ sinceSeq: "12" })).toEqual({
+      sinceSeq: 12,
+    });
+    expect(
+      terminalWebSocketQuerySchema.safeParse({ sinceSeq: "-1" }).success,
     ).toBe(false);
   });
 
@@ -1459,11 +1470,6 @@ describe("server-contract clients", () => {
       publicClient.threads[":id"].send.$url({ param: { id: "thr_123" } })
         .pathname,
     ).toBe("/api/v1/threads/thr_123/send");
-    expect(
-      publicClient.threads[":id"]["composer-bootstrap"].$url({
-        param: { id: "thr_123" },
-      }).pathname,
-    ).toBe("/api/v1/threads/thr_123/composer-bootstrap");
     expect(
       publicClient.threads[":id"]["queued-messages"].$url({
         param: { id: "thr_123" },

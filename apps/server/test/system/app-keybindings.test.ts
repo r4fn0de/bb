@@ -3,6 +3,7 @@ import { getAppKeybindingOverrides } from "@bb/db";
 import {
   PANE_FOCUS_APP_COMMAND_IDS,
   THREAD_JUMP_APP_COMMAND_IDS,
+  applyAppKeybindingOverrides,
   appKeybindingOverridesSchema,
 } from "@bb/domain";
 import { systemConfigResponseSchema } from "@bb/server-contract";
@@ -15,8 +16,26 @@ describe("app keybindings", () => {
       const response = await harness.app.request("/api/v1/system/config");
       expect(response.status).toBe(200);
       const config = systemConfigResponseSchema.parse(await readJson(response));
+      const assignedDefaultKeybindings = applyAppKeybindingOverrides(
+        config.defaultKeybindings,
+        [],
+      );
       expect(config.keybindingOverrides).toEqual([]);
-      expect(config.defaultKeybindings).toEqual(config.keybindings);
+      expect(assignedDefaultKeybindings).toEqual(config.keybindings);
+      for (const command of ["thread.rename", "thread.archive"] as const) {
+        expect(
+          config.defaultKeybindings.find(
+            (binding) => binding.command === command,
+          ),
+        ).toMatchObject({
+          desktopOnly: false,
+          shortcut: null,
+          when: { all: ["mainSurface"], none: ["modalOpen"] },
+        });
+        expect(
+          config.keybindings.some((binding) => binding.command === command),
+        ).toBe(false);
+      }
       expect(
         config.keybindings
           .filter((binding) => binding.command === "thread.new")
@@ -36,7 +55,7 @@ describe("app keybindings", () => {
         shortcut: { key: "n", mod: true, shift: true },
       });
       expect(
-        config.defaultKeybindings
+        assignedDefaultKeybindings
           .filter((binding) => binding.command === "thread.previous")
           .map((binding) => ({
             desktopOnly: binding.desktopOnly,
@@ -47,7 +66,7 @@ describe("app keybindings", () => {
         { desktopOnly: true, key: "[" },
       ]);
       expect(
-        config.defaultKeybindings
+        assignedDefaultKeybindings
           .filter((binding) => binding.command === "thread.next")
           .map((binding) => ({
             desktopOnly: binding.desktopOnly,
@@ -58,7 +77,7 @@ describe("app keybindings", () => {
         { desktopOnly: true, key: "]" },
       ]);
       expect(
-        config.defaultKeybindings
+        assignedDefaultKeybindings
           .filter((binding) => binding.command.startsWith("thread.jump."))
           .map((binding) => ({
             command: binding.command,
@@ -110,7 +129,7 @@ describe("app keybindings", () => {
         ]),
       );
       expect(
-        config.defaultKeybindings
+        assignedDefaultKeybindings
           .filter((binding) => binding.command === "terminal.open")
           .map((binding) => ({
             desktopOnly: binding.desktopOnly,
@@ -121,7 +140,7 @@ describe("app keybindings", () => {
         { desktopOnly: true, key: "t" },
       ]);
       expect(
-        config.defaultKeybindings.find(
+        assignedDefaultKeybindings.find(
           (binding) => binding.command === "composer.focus",
         ),
       ).toMatchObject({
@@ -132,8 +151,89 @@ describe("app keybindings", () => {
           none: ["modalOpen", "terminalFocus", "browserFocus"],
         },
       });
+      // The cycle chords must stay on plain Alt and share the scope of
+      // `modelPicker.toggle`. Alt is unused elsewhere in bb, so nothing shadows
+      // them and they shadow nothing.
       expect(
-        config.defaultKeybindings
+        assignedDefaultKeybindings
+          .filter((binding) => binding.command.startsWith("modelPicker.cycle"))
+          .map((binding) => ({
+            command: binding.command,
+            shortcut: binding.shortcut,
+            when: binding.when,
+          })),
+      ).toEqual([
+        {
+          command: "modelPicker.cycleModel",
+          shortcut: {
+            key: "m",
+            mod: false,
+            meta: false,
+            control: false,
+            alt: true,
+            shift: false,
+          },
+          when: {
+            all: ["mainSurface", "promptAvailable"],
+            none: ["modalOpen", "terminalFocus", "browserFocus"],
+          },
+        },
+        {
+          command: "modelPicker.cycleReasoning",
+          shortcut: {
+            key: "t",
+            mod: false,
+            meta: false,
+            control: false,
+            alt: true,
+            shift: false,
+          },
+          when: {
+            all: ["mainSurface", "promptAvailable"],
+            none: ["modalOpen", "terminalFocus", "browserFocus"],
+          },
+        },
+        // The picker popover is modal, so a second scoped copy of each chord
+        // keeps cycling alive while it is open.
+        {
+          command: "modelPicker.cycleModel",
+          shortcut: {
+            key: "m",
+            mod: false,
+            meta: false,
+            control: false,
+            alt: true,
+            shift: false,
+          },
+          when: { all: ["mainSurface", "modelPickerOpen"], none: [] },
+        },
+        {
+          command: "modelPicker.cycleReasoning",
+          shortcut: {
+            key: "t",
+            mod: false,
+            meta: false,
+            control: false,
+            alt: true,
+            shift: false,
+          },
+          when: { all: ["mainSurface", "modelPickerOpen"], none: [] },
+        },
+      ]);
+      // No other default binding may use Alt, so the cycle chords cannot be
+      // shadowed by an earlier binding for the same chord.
+      expect(
+        assignedDefaultKeybindings
+          .filter((binding) => binding.shortcut.alt)
+          .map((binding) => binding.command),
+      ).toEqual([
+        "modelPicker.cycleModel",
+        "modelPicker.cycleReasoning",
+        "modelPicker.cycleModel",
+        "modelPicker.cycleReasoning",
+      ]);
+      expect(
+        assignedDefaultKeybindings
           .filter((binding) => binding.command.startsWith("pane."))
           .map((binding) => ({
             command: binding.command,
@@ -221,7 +321,7 @@ describe("app keybindings", () => {
         },
       ]);
       expect(
-        config.defaultKeybindings
+        assignedDefaultKeybindings
           .filter((binding) => binding.desktopOnly)
           .map((binding) => binding.command),
       ).toEqual([
@@ -281,6 +381,78 @@ describe("app keybindings", () => {
           .filter((binding) => binding.command === "modelPicker.toggle")
           .every((binding) => binding.shortcut.key === "u"),
       ).toBe(true);
+    });
+  });
+
+  it("activates an assignable command without a default shortcut", async () => {
+    await withTestHarness(async (harness) => {
+      const shortcut = {
+        key: "r",
+        mod: true,
+        meta: false,
+        control: false,
+        alt: false,
+        shift: true,
+      };
+      const response = await harness.app.request("/api/v1/settings/keyboard", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify([{ command: "thread.rename", shortcut }]),
+      });
+      expect(response.status).toBe(200);
+
+      const configResponse = await harness.app.request("/api/v1/system/config");
+      const config = systemConfigResponseSchema.parse(
+        await readJson(configResponse),
+      );
+      expect(
+        config.keybindings.filter(
+          (binding) => binding.command === "thread.rename",
+        ),
+      ).toEqual([
+        {
+          command: "thread.rename",
+          desktopOnly: false,
+          shortcut,
+          when: { all: ["mainSurface"], none: ["modalOpen"] },
+        },
+      ]);
+    });
+  });
+
+  it("activates the archive command after assigning a shortcut", async () => {
+    await withTestHarness(async (harness) => {
+      const shortcut = {
+        key: "a",
+        mod: true,
+        meta: false,
+        control: false,
+        alt: false,
+        shift: true,
+      };
+      const response = await harness.app.request("/api/v1/settings/keyboard", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify([{ command: "thread.archive", shortcut }]),
+      });
+      expect(response.status).toBe(200);
+
+      const configResponse = await harness.app.request("/api/v1/system/config");
+      const config = systemConfigResponseSchema.parse(
+        await readJson(configResponse),
+      );
+      expect(
+        config.keybindings.filter(
+          (binding) => binding.command === "thread.archive",
+        ),
+      ).toEqual([
+        {
+          command: "thread.archive",
+          desktopOnly: false,
+          shortcut,
+          when: { all: ["mainSurface"], none: ["modalOpen"] },
+        },
+      ]);
     });
   });
 
@@ -344,7 +516,9 @@ describe("app keybindings", () => {
       expect(response.status).toBe(200);
       const config = systemConfigResponseSchema.parse(await readJson(response));
       expect(config.keybindingOverrides).toEqual([]);
-      expect(config.keybindings).toEqual(config.defaultKeybindings);
+      expect(config.keybindings).toEqual(
+        applyAppKeybindingOverrides(config.defaultKeybindings, []),
+      );
     });
   });
 });

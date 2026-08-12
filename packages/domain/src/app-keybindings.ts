@@ -38,6 +38,8 @@ export const PANE_FOCUS_APP_COMMAND_IDS = [
 export const APP_COMMAND_IDS = [
   "thread.new",
   "thread.search",
+  "thread.rename",
+  "thread.archive",
   "thread.previous",
   "thread.next",
   ...THREAD_JUMP_APP_COMMAND_IDS,
@@ -58,6 +60,8 @@ export const APP_COMMAND_IDS = [
   "terminal.open",
   "composer.focus",
   "modelPicker.toggle",
+  "modelPicker.cycleModel",
+  "modelPicker.cycleReasoning",
   "browser.focusLocation",
   "browser.reload",
   "workspace.openPreferred",
@@ -101,6 +105,8 @@ export type AppShortcut = z.infer<typeof appShortcutSchema>;
 
 export interface AppShortcutInput {
   altKey: boolean;
+  /** The physical key (`KeyboardEvent.code`), layout- and modifier-independent. */
+  code: string;
   ctrlKey: boolean;
   key: string;
   metaKey: boolean;
@@ -131,9 +137,30 @@ const SHIFTED_KEY_BASES: Readonly<Record<string, string>> = {
   "?": "/",
 };
 
+// The unshifted letter or digit a physical key produces, or null for every
+// other key (arrows, punctuation, F-keys), whose `key` is already stable.
+function baseKeyFromCode(code: string): string | null {
+  if (/^Key[A-Z]$/u.test(code)) return code.slice(3).toLowerCase();
+  if (/^Digit[0-9]$/u.test(code)) return code.slice(5);
+  return null;
+}
+
+function isAsciiAlphanumeric(value: string): boolean {
+  return /^[a-z0-9]$/iu.test(value);
+}
+
 export function normalizeAppShortcutInputKey(input: AppShortcutInput): string {
   if (input.key === " " || input.key === "Spacebar") {
     return "Space";
+  }
+  // macOS composes Option+<letter> into another character — Option+M reports
+  // key "µ" — so an Alt chord could never be matched by `key` there. Fall back
+  // to the physical key only when the composed character is NOT a plain letter
+  // or digit. A non-US layout still reports one (AZERTY Alt+A is key "a", code
+  // "KeyQ"), so it keeps matching the character the user actually sees.
+  if (input.altKey && !isAsciiAlphanumeric(input.key)) {
+    const fromCode = baseKeyFromCode(input.code);
+    if (fromCode !== null) return fromCode;
   }
   return input.shiftKey
     ? (SHIFTED_KEY_BASES[input.key] ?? input.key)
@@ -179,8 +206,14 @@ export const appKeybindingSchema = z
   .strict();
 export type AppKeybinding = z.infer<typeof appKeybindingSchema>;
 
+export const appDefaultKeybindingSchema = appKeybindingSchema.extend({
+  // Null keeps a command assignable without shipping a default shortcut.
+  shortcut: appShortcutSchema.nullable(),
+});
+export type AppDefaultKeybinding = z.infer<typeof appDefaultKeybindingSchema>;
+
 export function isAppKeybindingAvailableForClient(
-  binding: AppKeybinding,
+  binding: AppKeybinding | AppDefaultKeybinding,
   client: { isDesktop: boolean; isMac: boolean },
 ): boolean {
   if (binding.desktopOnly && !client.isDesktop) return false;
@@ -194,6 +227,11 @@ export function isAppKeybindingAvailableForClient(
 
 export const appKeybindingsSchema = z.array(appKeybindingSchema).max(256);
 export type AppKeybindings = z.infer<typeof appKeybindingsSchema>;
+
+export const appDefaultKeybindingsSchema = z
+  .array(appDefaultKeybindingSchema)
+  .max(256);
+export type AppDefaultKeybindings = z.infer<typeof appDefaultKeybindingsSchema>;
 
 export const appKeybindingOverrideSchema = z
   .object({
@@ -225,18 +263,15 @@ export type AppKeybindingOverrides = z.infer<
 >;
 
 export function applyAppKeybindingOverrides(
-  defaults: AppKeybindings,
+  defaults: AppDefaultKeybindings,
   overrides: AppKeybindingOverrides,
 ): AppKeybindings {
   return defaults.flatMap((binding) => {
     const override = overrides.find(
       (candidate) => candidate.command === binding.command,
     );
-    if (override === undefined) {
-      return [binding];
-    }
-    return override.shortcut === null
-      ? []
-      : [{ ...binding, shortcut: override.shortcut }];
+    const shortcut =
+      override === undefined ? binding.shortcut : override.shortcut;
+    return shortcut === null ? [] : [{ ...binding, shortcut }];
   });
 }

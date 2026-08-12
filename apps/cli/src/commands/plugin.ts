@@ -1,11 +1,12 @@
 import { watch } from "node:fs";
 import { homedir } from "node:os";
 import { access, readFile, realpath } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Command } from "commander";
 import { z } from "zod";
+import { derivePluginId } from "@bb/domain";
 import type {
   InstalledPlugin as PluginEntry,
   PluginApplyUpdateResult,
@@ -14,11 +15,8 @@ import type {
 } from "@bb/server-contract";
 import { installedPluginSchema } from "@bb/server-contract";
 import { BbHttpError } from "@bb/sdk";
-import {
-  parseDataDirEnvValue,
-  resolveProdDataDir,
-} from "@bb/config/runtime";
-import { scaffoldPlugin } from "@bb/templates/plugin-scaffold";
+import { parseDataDirEnvValue, resolveProdDataDir } from "@bb/config/runtime";
+import { scaffoldPlugin, syncPluginTypes } from "@bb/templates/plugin-scaffold";
 import { action } from "../action.js";
 import { cliFetch, createCliBbSdk } from "../client.js";
 import {
@@ -34,6 +32,30 @@ import { resolveBbCliVersion } from "../version.js";
 
 import { outputJson, type JsonOutputOptions } from "./helpers.js";
 import { renderBorderlessTable } from "../table.js";
+
+export interface NewPluginTarget {
+  packageName: string;
+  directoryName: string;
+}
+
+export function resolveNewPluginTarget(name: string): NewPluginTarget | null {
+  const packageName = name.startsWith("@")
+    ? name
+    : name.startsWith("bb-plugin-")
+      ? name
+      : `bb-plugin-${name}`;
+  if (
+    !/^(?:@[a-z0-9][a-z0-9-]*\/)?bb-plugin-[a-z0-9][a-z0-9-]*$/.test(
+      packageName,
+    )
+  ) {
+    return null;
+  }
+  return {
+    packageName,
+    directoryName: `bb-plugin-${derivePluginId(packageName)}`,
+  };
+}
 
 /**
  * Where `bb plugin build`/`dev` cache the pinned esbuild/Tailwind set.
@@ -118,6 +140,161 @@ const pluginManifestSchema = z.object({
     .optional(),
 });
 const secretSettingValueSchema = z.object({ set: z.boolean().optional() });
+
+/**
+ * Read a plugin directory's manifest. Returns null when the directory has no
+ * readable `package.json`, so callers can print their own guidance.
+ */
+async function readPluginManifest(
+  rootDir: string,
+): Promise<z.infer<typeof pluginManifestSchema> | null> {
+  try {
+    const raw: unknown = JSON.parse(
+      await readFile(join(rootDir, "package.json"), "utf8"),
+    );
+    return pluginManifestSchema.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Refresh `types/*.d.ts` against this CLI's bundled SDK declarations and
+ * report each file that actually changed.
+ *
+ * `bb plugin build` and `bb plugin dev` call this so an author never
+ * typechecks against declarations older than the bb they run. A failure here
+ * is reported and swallowed: a read-only or otherwise unwritable `types/`
+ * must not fail a build.
+ */
+async function refreshPluginTypes(
+  rootDir: string,
+  hasApp: boolean,
+): Promise<void> {
+  let files: Awaited<ReturnType<typeof syncPluginTypes>>;
+  try {
+    files = await syncPluginTypes({ rootDir, app: hasApp });
+  } catch (error) {
+    console.warn(
+      `Could not refresh types/ — ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return;
+  }
+  const written = files.filter((file) => file.outcome === "written");
+  if (written.length === 0) return;
+  console.log(
+    `Refreshed SDK declarations: ${written.map((file) => file.path).join(", ")}`,
+  );
+}
+
+/** The npm tree a generated scaffold declares — what its install must land. */
+const scaffoldPackageSchema = z.object({
+  dependencies: z.record(z.string(), z.string()).default({}),
+  devDependencies: z.record(z.string(), z.string()).default({}),
+});
+
+/**
+ * Why a scaffold's install cannot be trusted, or null when every declared
+ * package resolved.
+ *
+ * npm's exit code reports only that npm did what its resolved config told it
+ * to, so it stays 0 for an install that skipped packages the plugin needs to
+ * build — which is exactly the failure this guards (issue #1133).
+ */
+async function unresolvedScaffoldPackages(
+  targetDir: string,
+): Promise<string | null> {
+  let declared: string[];
+  try {
+    const manifest = scaffoldPackageSchema.parse(
+      JSON.parse(await readFile(join(targetDir, "package.json"), "utf8")),
+    );
+    declared = [
+      ...Object.keys(manifest.dependencies),
+      ...Object.keys(manifest.devDependencies),
+    ];
+  } catch {
+    return "the generated package.json could not be read back";
+  }
+  const missing: string[] = [];
+  for (const name of declared) {
+    if (!(await isPackageInstalled(targetDir, name))) {
+      missing.push(name);
+    }
+  }
+  return missing.length === 0
+    ? null
+    : `${missing.sort().join(", ")} missing from node_modules`;
+}
+
+/**
+ * Whether `name` resolves for a plugin at `targetDir`, following node's own
+ * lookup up the directory chain.
+ *
+ * Scaffolding inside an npm workspace makes npm install the whole workspace
+ * and hoist to its root, so the plugin's own node_modules can be legitimately
+ * empty. Checking only the plugin directory would report a healthy install as
+ * broken and send the author back to an `npm install` that hoists again.
+ */
+async function isPackageInstalled(
+  targetDir: string,
+  name: string,
+): Promise<boolean> {
+  const segments = name.split("/");
+  let dir = targetDir;
+  for (;;) {
+    try {
+      await access(join(dir, "node_modules", ...segments));
+      return true;
+    } catch {
+      const parent = dirname(dir);
+      if (parent === dir) return false;
+      dir = parent;
+    }
+  }
+}
+
+/**
+ * Install a fresh scaffold's npm tree, reporting whether it is usable.
+ *
+ * Generated source imports packages `bb plugin build` inlines into dist/ (zod;
+ * with --app, the vendored components' deps), and path: installs run server.ts
+ * from source, so the tree must exist before the plugin can build or load.
+ *
+ * `--include=dev` rather than a bare `npm install`: the packaged CLI runs with
+ * NODE_ENV=production — bb-app's launcher sets it for every `bb` invocation —
+ * which npm reads as `omit=dev`. A command-line flag outranks both that and an
+ * inherited `npm_config_omit`, so the install no longer depends on how bb was
+ * started. Best-effort overall: authors need npm anyway (design §5.5), so a
+ * failure surfaces the manual step rather than failing the scaffold.
+ */
+async function installScaffoldDependencies(
+  targetDir: string,
+): Promise<boolean> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  try {
+    await promisify(execFile)(
+      "npm",
+      ["install", "--include=dev", "--no-fund", "--no-audit"],
+      { cwd: targetDir },
+    );
+  } catch {
+    console.warn(
+      "Could not run npm install — run it in the plugin directory before `bb plugin build`.",
+    );
+    return false;
+  }
+  const problem = await unresolvedScaffoldPackages(targetDir);
+  if (problem !== null) {
+    console.warn(
+      `npm install reported success but ${problem} — run \`npm install --include=dev\` in the plugin directory before \`bb plugin build\`.`,
+    );
+    return false;
+  }
+  console.log("Installed dependencies (npm install).");
+  return true;
+}
 
 type PluginSettingDescriptor = z.infer<typeof pluginSettingDescriptorSchema>;
 type PluginSettingsResult = z.infer<typeof pluginSettingsResultSchema>;
@@ -204,7 +381,7 @@ function formatAbsoluteDate(value: string | number | undefined): string {
 function dualInterpretationError(source: string): string {
   return (
     `Could not resolve "${source}" as either a catalog plugin or a path on disk. ` +
-    "Use path:<path>, npm:<package>, or git:<url>@<ref> to choose an interpretation explicitly."
+    "Use a Git repository URL, path:<path>, npm:<package>, or git:<url>[@<ref>] to choose an interpretation explicitly."
   );
 }
 
@@ -247,6 +424,9 @@ async function resolveInstallIntent(
         summary: `Installing ${path}`,
       };
     }
+    return { kind: "source", source: input, summary: `Installing ${input}` };
+  }
+  if (/^https?:\/\//iu.test(input)) {
     return { kind: "source", source: input, summary: `Installing ${input}` };
   }
   if (hasPathSyntax(input)) {
@@ -478,7 +658,7 @@ export function registerPluginCommands(
   plugin
     .command("install <source>")
     .description(
-      "Install a bundled official plugin by name, local path, builtin:<name>, git:<url>@<ref>, or npm:<name>@<version> (managed sources validate engines ranges and build artifacts; bundled plugin ids are reserved)",
+      "Install a bundled official plugin by name, Git repository URL, local path, builtin:<name>, git:<url>[@<ref>], or npm:<name>@<version> (managed sources validate engines ranges and build artifacts; bundled plugin ids are reserved)",
     )
     .option("--yes", "Skip the confirmation prompt")
     .option("--json", "Output JSON")
@@ -679,7 +859,7 @@ export function registerPluginCommands(
   plugin
     .command("new <name>")
     .description(
-      "Scaffold a new plugin in ./bb-plugin-<name> (no server required)",
+      "Scaffold a plugin in ./bb-plugin-<name>; accepts @scope/bb-plugin-<name>",
     )
     .option(
       "--app",
@@ -687,51 +867,75 @@ export function registerPluginCommands(
     )
     .action(
       action(async (name: string, opts: { app?: boolean }) => {
-        const packageName = name.startsWith("bb-plugin-")
-          ? name
-          : `bb-plugin-${name}`;
-        if (!/^bb-plugin-[a-z0-9][a-z0-9-]*$/.test(packageName)) {
+        const target = resolveNewPluginTarget(name);
+        if (target === null) {
           console.error(
-            `Invalid plugin name "${name}" — use lowercase letters, digits, and dashes.`,
+            `Invalid plugin name "${name}" — use name, bb-plugin-name, or @scope/bb-plugin-name.`,
           );
           process.exit(1);
         }
-        const targetDir = resolve(process.cwd(), packageName);
+        const { directoryName, packageName } = target;
+        const targetDir = resolve(process.cwd(), directoryName);
         await scaffoldPlugin({
           targetDir,
           packageName,
           bbVersion: resolveBbCliVersion(),
           app: opts.app ?? false,
         });
-        console.log(`Created ${packageName}/`);
-        // App scaffolds vendor components whose npm deps must be installed
-        // before `bb plugin build` bundles them. Best-effort: authors need
-        // npm anyway (design §5.5); a failure here just surfaces the manual
-        // step.
-        let installed = false;
-        if (opts.app) {
-          const { execFile } = await import("node:child_process");
-          const { promisify } = await import("node:util");
-          try {
-            await promisify(execFile)(
-              "npm",
-              ["install", "--no-fund", "--no-audit"],
-              { cwd: targetDir },
-            );
-            installed = true;
-            console.log("Installed component dependencies (npm install).");
-          } catch {
-            console.warn(
-              "Could not run npm install — run it in the plugin directory before `bb plugin build`.",
-            );
-          }
-        }
+        console.log(`Created ${directoryName}/ (${packageName}).`);
+        const installed = await installScaffoldDependencies(targetDir);
         console.log("Next steps:");
-        console.log(`  cd ${packageName}`);
-        if (opts.app && !installed) {
-          console.log("  npm install");
+        console.log(`  cd ${directoryName}`);
+        if (!installed) {
+          console.log("  npm install --include=dev");
         }
         console.log("  bb plugin install .");
+      }),
+    );
+
+  plugin
+    .command("types [path]")
+    .description(
+      "Write this bb's @bb/plugin-sdk declarations into the plugin's types/ directory (default: cwd); the authoritative, readable API surface for editors, tsc, and agents",
+    )
+    .option("--check", "Report whether types/ is current; write nothing")
+    .action(
+      action(async (path: string | undefined, opts: { check?: boolean }) => {
+        const rootDir = resolve(process.cwd(), path ?? ".");
+        const manifest = await readPluginManifest(rootDir);
+        if (!manifest) {
+          console.error(
+            `No readable package.json in ${rootDir} — run from a plugin directory or pass its path.`,
+          );
+          process.exit(1);
+        }
+        if (typeof manifest.bb?.server !== "string") {
+          console.error(
+            `${rootDir} is not a bb plugin — package.json has no "bb.server" entry.`,
+          );
+          process.exit(1);
+        }
+        const hasApp = typeof manifest.bb.app === "string";
+        const files = await syncPluginTypes({
+          rootDir,
+          app: hasApp,
+          check: opts.check ?? false,
+        });
+        for (const file of files) {
+          console.log(`${file.path} ${file.outcome}`);
+        }
+        if (opts.check) {
+          if (files.some((file) => file.outcome === "stale")) {
+            console.error(
+              "Declarations are out of date — run `bb plugin types` to refresh them.",
+            );
+            process.exit(1);
+          }
+          return;
+        }
+        console.log(
+          "These declarations are the full plugin API — read them for exact signatures.",
+        );
       }),
     );
 
@@ -744,22 +948,21 @@ export function registerPluginCommands(
       action(async (path: string | undefined) => {
         const rootDir = resolve(process.cwd(), path ?? ".");
         const bbVersion = resolveBbCliVersion();
-        // buildPluginServer errors legibly on a missing/invalid bb.server —
-        // every plugin has one, so a headless plugin succeeds with just the
-        // backend bundle (prebuilt distribution, design §6).
+        // Read the manifest before building: buildPluginServer errors legibly
+        // on a missing/invalid bb.server, so a null manifest here is only the
+        // unreachable case where that read also fails.
+        const manifest = await readPluginManifest(rootDir);
+        const hasApp = typeof manifest?.bb?.app === "string";
+        // Keep the local declarations tracking the bb doing the build, so a
+        // plugin scaffolded against an older SDK never typechecks green
+        // against an API this bb no longer has. Gate on bb.server so a
+        // directory this command is about to reject is never written to first.
+        if (typeof manifest?.bb?.server === "string") {
+          await refreshPluginTypes(rootDir, hasApp);
+        }
         const toolchain = await cliBuildToolchain();
         const server = await buildPluginServer(rootDir, bbVersion, toolchain);
         const files = [server.jsPath, server.mapPath, server.metaPath];
-        let hasApp = false;
-        try {
-          const raw: unknown = JSON.parse(
-            await readFile(join(rootDir, "package.json"), "utf8"),
-          );
-          const pkg = pluginManifestSchema.parse(raw);
-          hasApp = typeof pkg.bb?.app === "string";
-        } catch {
-          // Unreachable in practice: buildPluginServer already read it.
-        }
         if (hasApp) {
           const app = await buildPluginApp(rootDir, bbVersion, toolchain);
           files.push(app.jsPath, app.cssPath, app.metaPath);
@@ -778,13 +981,8 @@ export function registerPluginCommands(
     .action(
       action(async (path: string | undefined) => {
         const rootDir = resolve(process.cwd(), path ?? ".");
-        let manifest: z.infer<typeof pluginManifestSchema>;
-        try {
-          const raw: unknown = JSON.parse(
-            await readFile(join(rootDir, "package.json"), "utf8"),
-          );
-          manifest = pluginManifestSchema.parse(raw);
-        } catch {
+        const manifest = await readPluginManifest(rootDir);
+        if (!manifest) {
           console.error(
             `No readable package.json in ${rootDir} — run from a plugin directory or pass its path.`,
           );
@@ -797,6 +995,9 @@ export function registerPluginCommands(
           process.exit(1);
         }
         const hasApp = typeof manifest.bb.app === "string";
+        // Refresh before the watcher starts, so writing types/ cannot feed
+        // the loop its own change event.
+        await refreshPluginTypes(rootDir, hasApp);
         // The dev loop drives an *installed* plugin; match this directory
         // against the server's installed rows (realpath tolerates symlinked
         // checkouts).

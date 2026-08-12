@@ -1,5 +1,6 @@
 export { createAgentRuntime } from "./runtime.js";
 export { fingerprintAcpLaunchSpec } from "./acp-launch-spec-fingerprint.js";
+export { createConfiguredPiSettingsManager } from "./pi/bridge/configured-services.js";
 export {
   createProviderForId,
   listAvailableProviderInfos as listAvailableProviders,
@@ -30,6 +31,7 @@ export type {
   StartThreadResult,
   SteerTurnArgs,
   StopThreadArgs,
+  StopThreadResult,
   WaitForActiveTurnArgs,
 } from "./types.js";
 export type {

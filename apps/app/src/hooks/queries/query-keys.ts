@@ -62,6 +62,8 @@ export const SYSTEM_CLI_SKILLS_QUERY_KEY = "systemCliSkills";
 export const SYSTEM_VERSION_QUERY_KEY = "systemVersion";
 export const HOST_PROVIDER_CLI_STATUS_QUERY_KEY = "hostProviderCliStatus";
 export const SYSTEM_USAGE_LIMITS_QUERY_KEY = "systemUsageLimits";
+export const ONBOARDING_AGENTS_QUERY_KEY = "onboardingAgents";
+export const ONBOARDING_REPOS_QUERY_KEY = "onboardingRepos";
 export const HOST_PATH_EXISTENCE_QUERY_KEY = "hostPathExistence";
 export const PROJECT_SKILLS_QUERY_KEY = "projectSkills";
 export const SKILL_CONTENT_QUERY_KEY = "skillContent";
@@ -182,7 +184,6 @@ export type DisabledThreadListQueryKey = readonly [
 ];
 export type ThreadQueryKeyPrefix = readonly [typeof THREAD_QUERY_KEY];
 export type ThreadQueryKey = readonly [typeof THREAD_QUERY_KEY, string];
-export type ThreadTabsQueryKeyPrefix = readonly [typeof THREAD_TABS_QUERY_KEY];
 export type ThreadTabsQueryKey = readonly [
   typeof THREAD_TABS_QUERY_KEY,
   string,
@@ -285,10 +286,6 @@ export type ThreadHostFilePreviewQueryKey = readonly [
 ];
 export type AllThreadHostFilePreviewQueryKeyPrefix = readonly [
   typeof THREAD_HOST_FILE_PREVIEW_QUERY_KEY,
-];
-export type ThreadHostFilePreviewQueryKeyPrefix = readonly [
-  typeof THREAD_HOST_FILE_PREVIEW_QUERY_KEY,
-  string,
 ];
 export type EnvironmentQueryKeyPrefix = readonly [typeof ENVIRONMENT_QUERY_KEY];
 export type EnvironmentQueryKey = readonly [
@@ -447,6 +444,14 @@ export type HostProviderCliStatusQueryKey = readonly [
 export type SystemUsageLimitsQueryKey = readonly [
   typeof SYSTEM_USAGE_LIMITS_QUERY_KEY,
   string | null,
+];
+export type OnboardingAgentsQueryKey = readonly [
+  typeof ONBOARDING_AGENTS_QUERY_KEY,
+  string | null,
+  string | null,
+];
+export type OnboardingReposQueryKey = readonly [
+  typeof ONBOARDING_REPOS_QUERY_KEY,
 ];
 export type SystemExecutionOptionsQueryKey = readonly [
   typeof SYSTEM_EXECUTION_OPTIONS_QUERY_KEY,
@@ -661,10 +666,6 @@ export function threadTabsQueryKey(threadId: string): ThreadTabsQueryKey {
   return [THREAD_TABS_QUERY_KEY, threadId];
 }
 
-export function allThreadTabsQueryKeyPrefix(): ThreadTabsQueryKeyPrefix {
-  return [THREAD_TABS_QUERY_KEY];
-}
-
 export function threadDetailBootstrapQueryKey(
   threadId: string,
 ): ThreadDetailBootstrapQueryKey {
@@ -809,12 +810,6 @@ export function threadHostFilePreviewQueryKey(
 
 export function allThreadHostFilePreviewQueryKeyPrefix(): AllThreadHostFilePreviewQueryKeyPrefix {
   return [THREAD_HOST_FILE_PREVIEW_QUERY_KEY];
-}
-
-export function threadHostFilePreviewQueryKeyPrefix(
-  threadId: string,
-): ThreadHostFilePreviewQueryKeyPrefix {
-  return [THREAD_HOST_FILE_PREVIEW_QUERY_KEY, threadId];
 }
 
 export function allEnvironmentQueryKeyPrefix(): EnvironmentQueryKeyPrefix {
@@ -1078,6 +1073,16 @@ export function systemUsageLimitsQueryKey(
   return [SYSTEM_USAGE_LIMITS_QUERY_KEY, hostId];
 }
 
+export function onboardingAgentsQueryKey(
+  args: Pick<SystemExecutionOptionsQueryKeyArgs, "environmentId" | "hostId">,
+): OnboardingAgentsQueryKey {
+  return [ONBOARDING_AGENTS_QUERY_KEY, args.environmentId, args.hostId];
+}
+
+export function onboardingReposQueryKey(): OnboardingReposQueryKey {
+  return [ONBOARDING_REPOS_QUERY_KEY];
+}
+
 export interface SystemExecutionOptionsQueryKeyArgs {
   environmentId: string | null;
   hostId: string | null;
@@ -1128,10 +1133,6 @@ export function skillContentQueryKey(
   path: string,
 ) {
   return [SKILL_CONTENT_QUERY_KEY, projectId, skillId, path] as const;
-}
-
-export function skillContentQueryKeyPrefix(projectId: string, skillId: string) {
-  return [SKILL_CONTENT_QUERY_KEY, projectId, skillId] as const;
 }
 
 export function skillFilesQueryKey(projectId: string, skillId: string) {

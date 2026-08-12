@@ -37,14 +37,14 @@ export const toolUseBlockSchema = z.object({
   input: z.unknown(),
 });
 
-export const claudeToolUseProcessResultSchema = z
+const claudeToolUseProcessResultSchema = z
   .object({
     stdout: z.string().optional(),
     stderr: z.string().optional(),
   })
   .passthrough();
 
-export const claudeToolUseResultSchema = z.union([
+const claudeToolUseResultSchema = z.union([
   claudeToolUseProcessResultSchema,
   z.string(),
 ]);
@@ -127,7 +127,7 @@ export const streamEventSchema = z.union([
   contentBlockStartSchema,
 ]);
 
-export const claudeAssistantMessageErrorSchema = z.enum([
+const claudeAssistantMessageErrorSchema = z.enum([
   "authentication_failed",
   "oauth_org_not_allowed",
   "billing_error",
@@ -349,6 +349,7 @@ export const claudeAssistantMessageSchema = z
   .object({
     type: z.literal("assistant"),
     message: z.unknown(),
+    uuid: z.string().min(1).optional(),
   })
   .passthrough();
 export type ClaudeAssistantMessage = z.infer<
@@ -379,7 +380,7 @@ export const claudeUserMessageSchema = z
   .passthrough();
 export type ClaudeUserMessage = z.infer<typeof claudeUserMessageSchema>;
 
-export const claudeResultSubtypeSchema = z.enum([
+const claudeResultSubtypeSchema = z.enum([
   "success",
   "error_during_execution",
   "error_max_turns",
@@ -404,37 +405,13 @@ export type ClaudeResultMessage = z.infer<typeof claudeResultMessageSchema>;
 
 const claudeRateLimitInfoSchema = z
   .object({
-    status: z.enum(["allowed", "allowed_warning", "rejected"]),
+    status: z.string().min(1),
     resetsAt: z.number().optional(),
-    rateLimitType: z
-      .enum([
-        "five_hour",
-        "seven_day",
-        "seven_day_opus",
-        "seven_day_sonnet",
-        "overage",
-      ])
-      .optional(),
-    overageStatus: z
-      .enum(["allowed", "allowed_warning", "rejected"])
-      .optional(),
-    overageDisabledReason: z
-      .enum([
-        "overage_not_provisioned",
-        "org_level_disabled",
-        "org_level_disabled_until",
-        "out_of_credits",
-        "seat_tier_level_disabled",
-        "member_level_disabled",
-        "seat_tier_zero_credit_limit",
-        "group_zero_credit_limit",
-        "member_zero_credit_limit",
-        "org_service_level_disabled",
-        "no_limits_configured",
-        "fetch_error",
-        "unknown",
-      ])
-      .optional(),
+    // Claude adds provider-defined windows over time. Keep the raw key instead
+    // of rejecting new model families or account tiers.
+    rateLimitType: z.string().min(1).optional(),
+    overageStatus: z.string().min(1).optional(),
+    overageDisabledReason: z.string().min(1).optional(),
   })
   .passthrough();
 

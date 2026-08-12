@@ -190,9 +190,14 @@ describe("Plugin detail recipe", () => {
     expect(renderedRecipe(container).map(([kind]) => kind)).toContain(
       "overview",
     );
-    expect(
-      screen.getByText("This plugin does not describe itself."),
-    ).toBeTruthy();
+    const description = screen.getByText(
+      "This plugin does not describe itself.",
+    );
+    expect(description.className).not.toContain("max-w-prose");
+    expect(description.className).toContain("max-w-none");
+    expect(description.className).toContain("text-sm");
+    expect(description.className).toContain("leading-relaxed");
+    expect(description.className).toContain("text-muted-foreground");
   });
 
   it("lists declared capabilities without category chrome", () => {
@@ -956,8 +961,13 @@ describe("Automation detail recipe", () => {
     ).not.toBeNull();
     expect(promptPanel.textContent).toContain("Opus 5");
     expect(promptPanel.textContent).toContain("Claude");
-    expect(promptPanel.textContent).not.toContain("Reasoning");
-    expect(promptPanel.textContent).not.toContain("Default");
+    // Scoped to the action row, which is where the model selector lives. The
+    // form also contains the footer's Project/Environment labels, and the
+    // compact environment label for a project-default environment is literally
+    // "Default", so asserting against the whole form would silently guard the
+    // wrong subject.
+    expect(promptActionRow.textContent).not.toContain("Reasoning");
+    expect(promptActionRow.textContent).not.toContain("Default");
     expect(
       container.querySelector('[data-automation-read-only-label=""]'),
     ).toBeNull();

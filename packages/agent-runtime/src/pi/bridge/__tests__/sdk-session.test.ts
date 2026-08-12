@@ -21,7 +21,16 @@ interface MockBashSpawnHook {
 }
 
 interface MockBashToolOptions {
+  commandPrefix?: string;
+  shellPath?: string;
   spawnHook?: MockBashSpawnHook;
+}
+
+interface MockCreateAgentSessionServicesOptions {
+  agentDir?: string;
+  cwd: string;
+  modelRuntime?: object;
+  resourceLoaderOptions: Record<string, unknown>;
 }
 
 interface MockBashToolTextContent {
@@ -53,15 +62,21 @@ const {
   mockDefineTool,
   mockOpen,
   mockInMemory,
-  mockSettingsInMemory,
+  mockCreateAgentSessionServices,
   mockCreateAgentSession,
+  mockBindExtensions,
   mockSessionState,
   mockSessionEventListeners,
   mockAbort,
+  mockCompact,
   mockDispose,
   mockPrompt,
   mockGetModel,
+  mockGetModels,
+  mockHasConfiguredAuth,
   mockModelRuntime,
+  mockGetShellCommandPrefix,
+  mockGetShellPath,
 } = vi.hoisted(() => {
   const mockSessionEventListeners: MockAgentSessionEventListener[] = [];
   const mockSubscribe = vi.fn<MockSubscribe>((listener) => {
@@ -76,14 +91,26 @@ const {
   const mockSessionState = { isStreaming: false };
   const mockPrompt = vi.fn();
   const mockAbort = vi.fn(async () => {});
+  const mockCompact = vi.fn(async () => {});
+  const mockBindExtensions = vi.fn(async () => {});
   const mockDispose = vi.fn();
+  const mockGetLeafId = vi.fn(() => "pi-entry-checkpoint");
+  const mockExtensionEmit = vi.fn(async () => {});
+  const mockHasExtensionHandlers = vi.fn(() => false);
   const mockGetSessionStats = vi.fn();
   const mockGetContextUsage = vi.fn();
   const mockGetActiveToolNames = vi.fn<() => string[]>(() => []);
   const mockSetActiveToolsByName = vi.fn<(toolNames: string[]) => void>();
   const mockOpen = vi.fn((path: string) => ({ kind: "open", path }));
   const mockInMemory = vi.fn((cwd?: string) => ({ kind: "in-memory", cwd }));
-  const mockSettingsInMemory = vi.fn(() => ({ kind: "settings" }));
+  const mockGetShellCommandPrefix = vi.fn<() => string | undefined>(
+    () => undefined,
+  );
+  const mockGetShellPath = vi.fn<() => string | undefined>(() => undefined);
+  const mockSettingsManager = {
+    getShellCommandPrefix: mockGetShellCommandPrefix,
+    getShellPath: mockGetShellPath,
+  };
   const mockCreateBashToolDefinition = vi.fn<MockCreateBashToolDefinition>(
     (_cwd, _options) => ({
       name: "bash",
@@ -102,13 +129,18 @@ const {
   const mockCreateAgentSession = vi.fn(async () => ({
     session: {
       abort: mockAbort,
+      bindExtensions: mockBindExtensions,
+      compact: mockCompact,
       subscribe: mockSubscribe,
       prompt: mockPrompt,
       dispose: mockDispose,
+      extensionRunner: { emit: mockExtensionEmit },
       getSessionStats: mockGetSessionStats,
       getContextUsage: mockGetContextUsage,
       getActiveToolNames: mockGetActiveToolNames,
+      hasExtensionHandlers: mockHasExtensionHandlers,
       setActiveToolsByName: mockSetActiveToolsByName,
+      sessionManager: { getLeafId: mockGetLeafId },
       get isStreaming() {
         return mockSessionState.isStreaming;
       },
@@ -123,7 +155,27 @@ const {
     id: modelId,
     provider,
   }));
-  const mockModelRuntime = { getModel: mockGetModel };
+  const mockGetModels = vi.fn<() => { id: string; provider: string }[]>(
+    () => [],
+  );
+  const mockHasConfiguredAuth = vi.fn<(provider: string) => boolean>(
+    () => true,
+  );
+  const mockModelRuntime = {
+    getModel: mockGetModel,
+    getModels: mockGetModels,
+    hasConfiguredAuth: mockHasConfiguredAuth,
+  };
+  const mockCreateAgentSessionServices = vi.fn(
+    async (options: MockCreateAgentSessionServicesOptions) => ({
+      agentDir: options.agentDir ?? "/tmp/pi-agent",
+      cwd: options.cwd,
+      diagnostics: [],
+      modelRuntime: options.modelRuntime ?? mockModelRuntime,
+      resourceLoader: { options: options.resourceLoaderOptions },
+      settingsManager: mockSettingsManager,
+    }),
+  );
 
   return {
     mockGetActiveToolNames,
@@ -132,33 +184,39 @@ const {
     mockDefineTool,
     mockOpen,
     mockInMemory,
-    mockSettingsInMemory,
+    mockCreateAgentSessionServices,
     mockCreateAgentSession,
+    mockBindExtensions,
     mockSessionState,
     mockSessionEventListeners,
     mockAbort,
+    mockCompact,
     mockDispose,
+    mockExtensionEmit,
+    mockHasExtensionHandlers,
     mockPrompt,
     mockGetModel,
+    mockGetModels,
+    mockHasConfiguredAuth,
     mockModelRuntime,
+    mockGetShellCommandPrefix,
+    mockGetShellPath,
   };
 });
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
-  createAgentSession: mockCreateAgentSession,
+  createAgentSessionFromServices: mockCreateAgentSession,
   createBashToolDefinition: mockCreateBashToolDefinition,
   defineTool: mockDefineTool,
+  getAgentDir: vi.fn(() => "/tmp/pi-agent"),
   SessionManager: {
     open: mockOpen,
     inMemory: mockInMemory,
   },
-  SettingsManager: {
-    inMemory: mockSettingsInMemory,
-  },
 }));
 
-vi.mock("../model-runtime.js", () => ({
-  getPiModelRuntime: vi.fn(async () => mockModelRuntime),
+vi.mock("../configured-services.js", () => ({
+  createConfiguredPiServices: mockCreateAgentSessionServices,
 }));
 
 import { PiSdkSession } from "../sdk-session.js";
@@ -230,10 +288,51 @@ describe("PiSdkSession", () => {
     mockSessionEventListeners.length = 0;
     mockGetActiveToolNames.mockReturnValue([]);
     mockAbort.mockResolvedValue(undefined);
+    mockCompact.mockResolvedValue(undefined);
     mockGetModel.mockImplementation((provider: string, modelId: string) => ({
       id: modelId,
       provider,
     }));
+    mockGetModels.mockReturnValue([]);
+    mockHasConfiguredAuth.mockReturnValue(true);
+    mockGetShellCommandPrefix.mockReturnValue(undefined);
+    mockGetShellPath.mockReturnValue(undefined);
+  });
+
+  it("creates Pi services from the user and project files", async () => {
+    const session = new PiSdkSession({ cwd: "/tmp/project" }, vi.fn(), vi.fn());
+
+    await session.start();
+
+    expect(mockCreateAgentSessionServices).toHaveBeenCalledWith({
+      cwd: "/tmp/project",
+      resourceLoaderOptions: {},
+    });
+  });
+
+  it("binds lifecycle handlers for extensions", async () => {
+    const session = new PiSdkSession({ cwd: "/tmp/project" }, vi.fn(), vi.fn());
+
+    await session.start();
+
+    expect(mockBindExtensions).toHaveBeenCalledWith({
+      mode: "rpc",
+      abortHandler: expect.any(Function),
+      shutdownHandler: expect.any(Function),
+      onError: expect.any(Function),
+    });
+  });
+
+  it("reports a broken configured extension before the thread starts", async () => {
+    mockCreateAgentSessionServices.mockRejectedValueOnce(
+      new Error("Failed to load Pi extension broken.ts: syntax error"),
+    );
+    const session = new PiSdkSession({ cwd: "/tmp/project" }, vi.fn(), vi.fn());
+
+    await expect(session.start()).rejects.toThrow(
+      "Failed to load Pi extension broken.ts",
+    );
+    expect(mockCreateAgentSession).not.toHaveBeenCalled();
   });
 
   it("opens a persistent session file when provided", async () => {
@@ -291,9 +390,142 @@ describe("PiSdkSession", () => {
           id: "gpt-5.5",
           provider: "openai-codex",
         },
-        modelRuntime: mockModelRuntime,
+        services: expect.objectContaining({ modelRuntime: mockModelRuntime }),
       }),
     );
+  });
+
+  it("keeps the aggregator provider for a model id that contains a slash", async () => {
+    const session = new PiSdkSession(
+      {
+        cwd: "/tmp/project",
+        model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      },
+      vi.fn(),
+      vi.fn(),
+    );
+
+    await session.start();
+
+    expect(mockGetModel).toHaveBeenCalledWith(
+      "openrouter",
+      "deepseek/deepseek-v4-flash-0731",
+    );
+    expect(mockCreateAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: {
+          id: "deepseek/deepseek-v4-flash-0731",
+          provider: "openrouter",
+        },
+      }),
+    );
+  });
+
+  it("resolves a bare model id that names no provider", async () => {
+    // Selections stored before bb prefixed aggregator models keep this shape.
+    mockGetModel.mockReturnValue(undefined);
+    mockGetModels.mockReturnValue([
+      { id: "deepseek/deepseek-v4-flash-0731", provider: "openrouter" },
+    ]);
+    const session = new PiSdkSession(
+      {
+        cwd: "/tmp/project",
+        model: "deepseek/deepseek-v4-flash-0731",
+      },
+      vi.fn(),
+      vi.fn(),
+    );
+
+    await session.start();
+
+    expect(mockCreateAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: {
+          id: "deepseek/deepseek-v4-flash-0731",
+          provider: "openrouter",
+        },
+      }),
+    );
+  });
+
+  it("never substitutes another vendor for the named provider", async () => {
+    // The named provider has no credentials, and two aggregators serve the same
+    // id. Routing there would bill and expose a vendor the user never chose.
+    mockGetModel.mockReturnValue({
+      id: "claude-sonnet-5",
+      provider: "anthropic",
+    });
+    mockGetModels.mockReturnValue([
+      { id: "anthropic/claude-sonnet-5", provider: "openrouter" },
+    ]);
+    mockHasConfiguredAuth.mockImplementation(
+      (provider: string) => provider === "openrouter",
+    );
+    const session = new PiSdkSession(
+      {
+        cwd: "/tmp/project",
+        model: "anthropic/claude-sonnet-5",
+      },
+      vi.fn(),
+      vi.fn(),
+    );
+
+    await session.start();
+
+    expect(mockCreateAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: { id: "claude-sonnet-5", provider: "anthropic" },
+      }),
+    );
+  });
+
+  it("uses the sole authenticated provider for an ambiguous bare model id", async () => {
+    mockGetModel.mockReturnValue(undefined);
+    mockGetModels.mockReturnValue([
+      { id: "gpt-5.6-terra", provider: "azure-openai-responses" },
+      { id: "gpt-5.6-terra", provider: "openai" },
+      { id: "gpt-5.6-terra", provider: "openai-codex" },
+    ]);
+    mockHasConfiguredAuth.mockImplementation(
+      (provider: string) => provider === "openai-codex",
+    );
+    const session = new PiSdkSession(
+      {
+        cwd: "/tmp/project",
+        model: "gpt-5.6-terra",
+      },
+      vi.fn(),
+      vi.fn(),
+    );
+
+    await session.start();
+
+    expect(mockCreateAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: { id: "gpt-5.6-terra", provider: "openai-codex" },
+      }),
+    );
+  });
+
+  it("refuses to guess when two providers serve one bare model id", async () => {
+    mockGetModel.mockReturnValue(undefined);
+    mockGetModels.mockReturnValue([
+      { id: "anthropic/claude-opus-4.8", provider: "openrouter" },
+      { id: "anthropic/claude-opus-4.8", provider: "vercel-ai-gateway" },
+    ]);
+    const session = new PiSdkSession(
+      {
+        cwd: "/tmp/project",
+        model: "anthropic/claude-opus-4.8",
+      },
+      vi.fn(),
+      vi.fn(),
+    );
+
+    await expect(session.start()).rejects.toThrow(
+      /Ambiguous Pi model "anthropic\/claude-opus-4\.8": served by openrouter, vercel-ai-gateway/,
+    );
+    expect(mockCreateAgentSession).not.toHaveBeenCalled();
   });
 
   it("rejects unresolved explicit models before opening a Pi session", async () => {
@@ -339,6 +571,8 @@ describe("PiSdkSession", () => {
     const previousProcessOnlyEnvValue = process.env[processOnlyEnvKey];
     delete process.env[sessionEnvKey];
     process.env[processOnlyEnvKey] = "daemon-secret";
+    mockGetShellCommandPrefix.mockReturnValue("source ~/.profile &&");
+    mockGetShellPath.mockReturnValue("/bin/zsh");
 
     try {
       const session = new PiSdkSession(
@@ -358,6 +592,13 @@ describe("PiSdkSession", () => {
       expect(process.env[sessionEnvKey]).toBeUndefined();
       expect(process.env[processOnlyEnvKey]).toBe("daemon-secret");
       expect(mockCreateBashToolDefinition).toHaveBeenCalledTimes(1);
+      expect(mockCreateBashToolDefinition).toHaveBeenCalledWith(
+        "/tmp/project",
+        expect.objectContaining({
+          commandPrefix: "source ~/.profile &&",
+          shellPath: "/bin/zsh",
+        }),
+      );
 
       const bashToolCall = mockCreateBashToolDefinition.mock.calls[0];
       if (!bashToolCall) {
@@ -695,6 +936,55 @@ describe("PiSdkSession", () => {
     expect(session.getIsProcessing()).toBe(false);
   });
 
+  it("stays processing while Pi performs post-turn streaming work", async () => {
+    const session = new PiSdkSession({ cwd: "/tmp/project" }, vi.fn(), vi.fn());
+    await session.start();
+    await session.prompt("trigger auto compaction");
+
+    emitSessionEvent(createAgentEndEvent());
+    mockSessionState.isStreaming = true;
+
+    expect(session.getIsProcessing()).toBe(true);
+    await expect(session.compact()).rejects.toThrow(
+      "Cannot compact context while Pi is processing a turn",
+    );
+    expect(mockCompact).not.toHaveBeenCalled();
+  });
+
+  it("propagates compaction failures that emit no terminal event", async () => {
+    const error = new Error("Pi rejected compaction before it started");
+    mockCompact.mockRejectedValueOnce(error);
+    const session = new PiSdkSession({ cwd: "/tmp/project" }, vi.fn(), vi.fn());
+    await session.start();
+
+    await expect(session.compact()).rejects.toBe(error);
+    expect(session.getIsCompacting()).toBe(false);
+  });
+
+  it("uses the SDK terminal event as the compaction outcome", async () => {
+    const error = new Error("Pi reported compaction failure");
+    mockCompact.mockImplementationOnce(async () => {
+      emitSessionEvent({
+        type: "compaction_start",
+        reason: "manual",
+      });
+      emitSessionEvent({
+        type: "compaction_end",
+        reason: "manual",
+        result: undefined,
+        aborted: false,
+        willRetry: false,
+        errorMessage: error.message,
+      });
+      throw error;
+    });
+    const session = new PiSdkSession({ cwd: "/tmp/project" }, vi.fn(), vi.fn());
+    await session.start();
+
+    await expect(session.compact()).resolves.toBeUndefined();
+    expect(session.getIsCompacting()).toBe(false);
+  });
+
   it("waits for abort before disposing during graceful close", async () => {
     let resolveAbort: (() => void) | undefined;
     mockAbort.mockImplementation(
@@ -715,7 +1005,7 @@ describe("PiSdkSession", () => {
       throw new Error("Expected Pi abort promise to be pending");
     }
     resolveAbort();
-    await closePromise;
+    await expect(closePromise).resolves.toBe("pi-entry-checkpoint");
 
     expect(mockDispose).toHaveBeenCalledTimes(1);
     expect(session.getIsProcessing()).toBe(false);

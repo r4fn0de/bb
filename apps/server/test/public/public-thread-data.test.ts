@@ -1,8 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import {
-  archiveThread,
   claimQueuedThreadMessage,
-  createPromptHistoryEntry,
   createQueuedThreadMessageId,
   createThreadSection,
   deleteQueuedThreadMessage,
@@ -10,13 +8,13 @@ import {
   environments,
   events,
   getQueuedThreadMessage,
+  insertEvents,
   listQueuedThreadMessages,
   getThread,
   queuedThreadMessages,
   reorderQueuedThreadMessage,
   setQueuedThreadMessageGroupBoundary,
   setThreadExecutionOverride,
-  upsertProjectExecutionDefaults,
 } from "@bb/db";
 import {
   encodeClientTurnRequestIdNumber,
@@ -30,7 +28,6 @@ import {
   sidebarBootstrapResponseSchema,
   threadSectionMutationResponseSchema,
   threadSectionSchema,
-  threadComposerBootstrapResponseSchema,
   threadConversationOutlineResponseSchema,
   threadQueuedMessageListResponseSchema,
   threadTimelineResponseSchema,
@@ -49,19 +46,14 @@ import {
   waitForQueuedCommand,
   waitForQueuedCommandAfter,
 } from "../helpers/commands.js";
-import {
-  registerHostRpcResponder,
-  registerProviderHostRpcResponder,
-} from "../helpers/host-rpc.js";
+import { registerHostRpcResponder } from "../helpers/host-rpc.js";
 import { readJson } from "../helpers/json.js";
 import { textInput } from "../helpers/prompt-input.js";
 import {
-  seedHost,
   seedQueuedMessage,
   seedEnvironment,
   seedEvent,
   seedHostSession,
-  seedPrimaryHost,
   seedProjectWithSource,
   seedStoredEvent,
   seedThread,
@@ -1515,6 +1507,147 @@ describe("public thread data routes", () => {
       );
     });
   });
+
+  it(
+    "expands the newest slice when a large delegation parent completes last",
+    async () => {
+      await withTestHarness(async (harness) => {
+        const { environment, thread } = seedThreadFixture(harness);
+        const providerThreadId = "provider-thread-1";
+        const turnId = "parent-turn";
+        const parentToolCallId = "agent-call";
+        type EventInput = Parameters<typeof insertEvents>[2][number];
+        const eventInputs: EventInput[] = [];
+        let sequence = 0;
+        const push = (
+          event: Omit<EventInput, "environmentId" | "sequence" | "threadId">,
+        ): void => {
+          sequence += 1;
+          eventInputs.push({
+            ...event,
+            environmentId: environment.id,
+            sequence,
+            threadId: thread.id,
+          });
+        };
+
+        push({
+          providerThreadId,
+          scope: turnScope(turnId),
+          type: "turn/started",
+          itemId: null,
+          itemKind: null,
+          data: JSON.stringify({}),
+        });
+        push({
+          providerThreadId,
+          scope: turnScope(turnId),
+          type: "item/started",
+          itemId: parentToolCallId,
+          itemKind: "toolCall",
+          data: JSON.stringify({
+            item: {
+              type: "toolCall",
+              id: parentToolCallId,
+              tool: "Agent",
+              arguments: { prompt: "Do the long task." },
+              status: "pending",
+            },
+          }),
+        });
+        for (let item = 0; item < 650; item += 1) {
+          const itemId = `command-${item}`;
+          const command = "x".repeat(25_000);
+          push({
+            providerThreadId,
+            scope: turnScope(turnId),
+            type: "item/started",
+            itemId,
+            itemKind: "commandExecution",
+            data: JSON.stringify({
+              item: {
+                type: "commandExecution",
+                id: itemId,
+                command,
+                cwd: "/tmp/test",
+                parentToolCallId,
+                status: "pending",
+                approvalStatus: null,
+              },
+            }),
+          });
+          push({
+            providerThreadId,
+            scope: turnScope(turnId),
+            type: "item/completed",
+            itemId,
+            itemKind: "commandExecution",
+            data: JSON.stringify({
+              item: {
+                type: "commandExecution",
+                id: itemId,
+                command,
+                cwd: "/tmp/test",
+                parentToolCallId,
+                status: "completed",
+                approvalStatus: null,
+                exitCode: 0,
+                aggregatedOutput: `output ${item}`,
+              },
+            }),
+          });
+        }
+        push({
+          providerThreadId,
+          scope: turnScope(turnId),
+          type: "item/completed",
+          itemId: parentToolCallId,
+          itemKind: "toolCall",
+          data: JSON.stringify({
+            item: {
+              type: "toolCall",
+              id: parentToolCallId,
+              tool: "Agent",
+              arguments: { prompt: "Do the long task." },
+              result: "",
+              status: "completed",
+            },
+          }),
+        });
+        push({
+          providerThreadId,
+          scope: turnScope(turnId),
+          type: "turn/completed",
+          itemId: null,
+          itemKind: null,
+          data: JSON.stringify({ status: "completed", providerThreadId }),
+        });
+        insertEvents(harness.deps.db, harness.deps.hub, eventInputs);
+
+        const timelineResponse = await harness.app.request(
+          `/api/v1/threads/${thread.id}/timeline`,
+        );
+        expect(timelineResponse.status).toBe(200);
+        const timeline = threadTimelineResponseSchema.parse(
+          await readJson(timelineResponse),
+        );
+        const turnRow = timeline.rows.find(
+          (row): row is TimelineTurnRow => row.kind === "turn",
+        );
+        expect(turnRow).toBeDefined();
+        if (!turnRow) {
+          throw new Error("Expected a turn row");
+        }
+        expect(turnRow.sourceSeqStart).toBeGreaterThan(2);
+
+        const detailsResponse = await harness.app.request(
+          `/api/v1/threads/${thread.id}/timeline/turn-summary-details?turnId=${turnRow.turnId}&sourceSeqStart=${turnRow.sourceSeqStart}&sourceSeqEnd=${turnRow.sourceSeqEnd}`,
+        );
+        expect(detailsResponse.status).toBe(200);
+      });
+    },
+    10_000,
+  );
 
   it("hydrates turn-summary details with future accepted input context", async () => {
     await withTestHarness(async (harness) => {
@@ -3078,304 +3211,6 @@ describe("public thread data routes", () => {
           }),
         ]),
       );
-    });
-  });
-
-  it("loads legacy thread composer bootstrap state", async () => {
-    await withTestHarness(async (harness) => {
-      seedHostSession(harness.deps, {
-        id: "host-composer-default",
-      });
-      const { host, session } = seedHostSession(harness.deps, {
-        id: "host-composer-thread",
-      });
-      seedPrimaryHost(harness.deps, host.id);
-      const providerResponder = registerProviderHostRpcResponder(harness, {
-        hostId: host.id,
-        sessionId: session.id,
-        modelsByProviderId: {
-          codex: {
-            models: [
-              {
-                id: "gpt-5.5",
-                model: "gpt-5.5",
-                displayName: "GPT-5.5",
-                description: "Frontier model",
-                supportedReasoningEfforts: [
-                  {
-                    reasoningEffort: "xhigh",
-                    description: "Extra high",
-                  },
-                ],
-                defaultReasoningEffort: "xhigh",
-                isDefault: true,
-              },
-            ],
-            selectedOnlyModels: [],
-          },
-        },
-      });
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: host.id,
-      });
-      const environment = seedEnvironment(harness.deps, {
-        hostId: host.id,
-        projectId: project.id,
-      });
-      const thread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-      });
-      seedEvent(harness.deps, {
-        threadId: thread.id,
-        environmentId: environment.id,
-        sequence: 1,
-        type: "client/turn/requested",
-        scope: threadScope(),
-        data: {
-          direction: "outbound",
-          requestId: encodeClientTurnRequestIdNumber({ value: 601 }),
-          input: [{ type: "text", text: "Accepted prompt" }],
-          target: { kind: "new-turn" },
-          execution: {
-            model: "gpt-5.5",
-            serviceTier: "default",
-            reasoningLevel: "xhigh",
-            permissionMode: "workspace-write",
-            source: "client/turn/requested",
-          },
-          initiator: "user",
-          senderThreadId: null,
-          request: {
-            method: "turn/start",
-            params: {},
-          },
-          source: "tell",
-        },
-      });
-      createPromptHistoryEntry(harness.deps.db, {
-        projectId: project.id,
-        threadId: thread.id,
-        scope: "thread",
-        requestSequence: 1,
-        input: textInput("Accepted prompt"),
-      });
-      seedQueuedMessage(harness.deps, {
-        threadId: thread.id,
-        content: textInput("Queued message"),
-        model: "gpt-5.5",
-        reasoningLevel: "xhigh",
-        permissionMode: "accept-edits",
-        serviceTier: "default",
-      });
-
-      const response = await harness.app.request(
-        `/api/v1/threads/${thread.id}/composer-bootstrap`,
-      );
-
-      expect(response.status).toBe(200);
-      const bootstrap = threadComposerBootstrapResponseSchema.parse(
-        await readJson(response),
-      );
-      expect(bootstrap.defaultExecutionOptions).toMatchObject({
-        model: "gpt-5.5",
-        reasoningLevel: "xhigh",
-        permissionMode: "accept-edits",
-      });
-      expect(bootstrap.queuedMessages).toHaveLength(1);
-      expect(bootstrap.queuedMessages[0]?.content).toEqual(
-        textInput("Queued message"),
-      );
-      expect(bootstrap.pendingInteractions).toEqual([]);
-      expect(bootstrap.promptHistory.map((entry) => entry.input)).toEqual(
-        expect.arrayContaining([
-          textInput("Accepted prompt"),
-          textInput("Queued message"),
-        ]),
-      );
-      const { executionOptions } = bootstrap;
-      if (executionOptions === null) {
-        throw new Error(
-          "expected resolved executionOptions for an environment-backed thread",
-        );
-      }
-      const codexProvider = executionOptions.providers.find(
-        (provider) => provider.id === "codex",
-      );
-      expect(codexProvider).toMatchObject({
-        id: "codex",
-      });
-      expect(executionOptions.models[0]?.model).toBe("gpt-5.5");
-      expect(
-        providerResponder.requests.map((request) => request.command),
-      ).toEqual([
-        {
-          type: "known_acp_agents.status",
-          agents: [
-            { id: "acp-opencode", executableName: "opencode" },
-            { id: "acp-omp", executableName: "omp" },
-            { id: "acp-grok", executableName: "grok" },
-            { id: "acp-hermes-agent", executableName: "hermes" },
-          ],
-        },
-        { type: "provider.list_models", providerId: "codex" },
-      ]);
-    });
-  });
-
-  it("keeps ACP thread composer defaults when provider discovery is degraded", async () => {
-    await withTestHarness(async (harness) => {
-      const { host, session } = seedHostSession(harness.deps, {
-        id: "host-composer-acp-degraded",
-      });
-      seedPrimaryHost(harness.deps, host.id);
-      const providerResponder = registerHostRpcResponder(harness, {
-        hostId: host.id,
-        sessionId: session.id,
-        handle: (request) => {
-          if (
-            request.command.type === "known_acp_agents.status" ||
-            request.command.type === "provider.list_models"
-          ) {
-            return {
-              ok: false,
-              errorCode: "command_failed",
-              errorMessage: "Runtime shutting down",
-            };
-          }
-          throw new Error(`Unexpected RPC command ${request.command.type}`);
-        },
-      });
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: host.id,
-      });
-      upsertProjectExecutionDefaults(harness.deps.db, {
-        projectId: project.id,
-        providerId: "acp-cursor",
-        model: "composer-2.5",
-        reasoningLevel: "medium",
-        permissionMode: "accept-edits",
-        serviceTier: "default",
-      });
-      const environment = seedEnvironment(harness.deps, {
-        hostId: host.id,
-        projectId: project.id,
-      });
-      const thread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-        providerId: "acp-opencode",
-      });
-      seedThreadRuntimeState(harness.deps, {
-        environmentId: environment.id,
-        inputText: "New review comments on the PR",
-        model: "zai-coding-plan/glm-5.2",
-        permissionMode: "accept-edits",
-        providerThreadId: "ses_opencode",
-        reasoningLevel: "medium",
-        threadId: thread.id,
-      });
-
-      const response = await harness.app.request(
-        `/api/v1/threads/${thread.id}/composer-bootstrap`,
-      );
-
-      expect(response.status).toBe(200);
-      const bootstrap = threadComposerBootstrapResponseSchema.parse(
-        await readJson(response),
-      );
-      expect(bootstrap.defaultExecutionOptions).toMatchObject({
-        model: "zai-coding-plan/glm-5.2",
-        permissionMode: "accept-edits",
-        reasoningLevel: "medium",
-      });
-      const { executionOptions } = bootstrap;
-      if (executionOptions === null) {
-        throw new Error(
-          "expected degraded executionOptions for an environment-backed ACP thread",
-        );
-      }
-      expect(
-        executionOptions.providers.some(
-          (provider) => provider.id === "acp-opencode",
-        ),
-      ).toBe(true);
-      expect(executionOptions.modelLoadError).toMatchObject({
-        providerId: "acp-opencode",
-      });
-      expect(
-        providerResponder.requests.map((request) => request.command.type),
-      ).toEqual(["known_acp_agents.status", "provider.list_models"]);
-      expect(providerResponder.requests[1]?.command).toMatchObject({
-        type: "provider.list_models",
-        providerId: "acp-opencode",
-      });
-    });
-  });
-
-  it("returns null composer defaults for stale project execution defaults", async () => {
-    await withTestHarness(async (harness) => {
-      const { host } = seedHostSession(harness.deps, {
-        id: "host-composer-stale-project-defaults",
-      });
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: host.id,
-      });
-      upsertProjectExecutionDefaults(harness.deps.db, {
-        projectId: project.id,
-        providerId: "codex",
-        model: "gpt-5.5",
-        // ultracode is Claude-only; stale for Codex project defaults.
-        reasoningLevel: "ultracode",
-        permissionMode: "full",
-        serviceTier: "default",
-      });
-      const thread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: null,
-        providerId: "codex",
-      });
-
-      const response = await harness.app.request(
-        `/api/v1/threads/${thread.id}/composer-bootstrap`,
-      );
-
-      expect(response.status).toBe(200);
-      const bootstrap = threadComposerBootstrapResponseSchema.parse(
-        await readJson(response),
-      );
-      expect(bootstrap.defaultExecutionOptions).toBeNull();
-      expect(bootstrap.executionOptions).toBeNull();
-    });
-  });
-
-  it("returns null composer execution options for archived threads on offline hosts", async () => {
-    await withTestHarness(async (harness) => {
-      const host = seedHost(harness.deps, {
-        id: "host-composer-archived-offline",
-      });
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: host.id,
-      });
-      const environment = seedEnvironment(harness.deps, {
-        hostId: host.id,
-        projectId: project.id,
-      });
-      const thread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-      });
-      archiveThread(harness.db, harness.hub, thread.id);
-
-      const response = await harness.app.request(
-        `/api/v1/threads/${thread.id}/composer-bootstrap`,
-      );
-
-      expect(response.status).toBe(200);
-      const bootstrap = threadComposerBootstrapResponseSchema.parse(
-        await readJson(response),
-      );
-      expect(bootstrap.executionOptions).toBeNull();
     });
   });
 

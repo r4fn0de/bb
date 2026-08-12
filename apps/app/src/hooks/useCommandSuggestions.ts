@@ -1,8 +1,6 @@
 import { useMemo } from "react";
 import type { PromptMentionCommandTrigger } from "@bb/domain";
 import {
-  compareCommandSuggestionSections,
-  orderCommandSuggestionsBySection,
   toProviderCommandSuggestion,
   type ProviderCommandSuggestion,
 } from "@/components/promptbox/mentions/types";
@@ -11,6 +9,8 @@ import { useProjectCommands } from "./queries/project-queries";
 export interface UseCommandSuggestionsArgs {
   projectId: string | undefined;
   providerId: string | undefined;
+  /** Composer surface used to exclude commands that require an existing thread. */
+  commandScope: "new-thread" | "thread";
   skillsTrigger: PromptMentionCommandTrigger | null;
   promptActions?: readonly CommandSuggestionPromptAction[];
   /**
@@ -68,39 +68,18 @@ export function commandSuggestionMatchesQuery(
     .includes(query);
 }
 
-function commandSuggestionSearchNames(
-  suggestion: ProviderCommandSuggestion,
-): string[] {
-  const name = suggestion.name.toLowerCase();
-  if (suggestion.source !== "skill") {
-    return [name];
-  }
-  const separatorIndex = name.lastIndexOf(":");
-  return separatorIndex < 0 ? [name] : [name, name.slice(separatorIndex + 1)];
-}
-
+/**
+ * Filter the cached catalog without changing its order. PromptBoxInternal owns
+ * the single relevance-ordering pass because it has the query under the caret.
+ */
 export function filterCommandSuggestions(
   suggestions: readonly ProviderCommandSuggestion[],
   query: string,
 ): ProviderCommandSuggestion[] {
   const normalizedQuery = query.toLowerCase();
-  return suggestions
-    .filter((suggestion) =>
-      commandSuggestionMatchesQuery(suggestion, normalizedQuery),
-    )
-    .sort((left, right) => {
-      const bySection = compareCommandSuggestionSections(left, right);
-      if (bySection !== 0) {
-        return bySection;
-      }
-      const leftPrefix = commandSuggestionSearchNames(left).some((name) =>
-        name.startsWith(normalizedQuery),
-      );
-      const rightPrefix = commandSuggestionSearchNames(right).some((name) =>
-        name.startsWith(normalizedQuery),
-      );
-      return leftPrefix === rightPrefix ? 0 : leftPrefix ? -1 : 1;
-    });
+  return suggestions.filter((suggestion) =>
+    commandSuggestionMatchesQuery(suggestion, normalizedQuery),
+  );
 }
 
 export function promptActionCommandSuggestions({
@@ -203,14 +182,24 @@ export function useCommandSuggestions(
       return [];
     }
     const discoveredSuggestions = filterCommandSuggestions(
-      (commandsQuery.data?.commands ?? []).map(toProviderCommandSuggestion),
+      (commandsQuery.data?.commands ?? [])
+        .map(toProviderCommandSuggestion)
+        .filter(
+          (suggestion) =>
+            args.commandScope === "thread" ||
+            suggestion.source !== "command" ||
+            suggestion.origin !== "builtin" ||
+            suggestion.name !== "compact",
+        ),
       trimmedQuery,
     );
-    return orderCommandSuggestionsBySection(
-      mergeCommandSuggestions(promptActionSuggestions, discoveredSuggestions),
+    return mergeCommandSuggestions(
+      promptActionSuggestions,
+      discoveredSuggestions,
     );
   }, [
     commandsQuery.data?.commands,
+    args.commandScope,
     isActive,
     promptActionSuggestions,
     trimmedQuery,

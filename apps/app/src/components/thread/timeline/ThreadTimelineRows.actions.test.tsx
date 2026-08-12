@@ -94,6 +94,37 @@ function SameThreadSearchNavigationHarness() {
   );
 }
 
+function EditActionAvailabilityHarness({
+  onEditMessage,
+}: {
+  onEditMessage: NonNullable<
+    ComponentProps<typeof ThreadTimelineRows>["onEditMessage"]
+  >;
+}) {
+  const [rows] = useState(() => [
+    conversationRow({
+      id: "earlier_user_message",
+      role: "user",
+      text: "An earlier request.",
+      sourceSeqStart: 3,
+    }),
+    conversationRow({
+      id: "latest_user_message",
+      role: "user",
+      text: "The latest request.",
+      sourceSeqStart: 7,
+    }),
+  ]);
+  return (
+    <ThreadTimelineRows
+      timelineRows={rows}
+      onEditMessage={onEditMessage}
+      threadRuntimeDisplayStatus="active"
+      workspaceRootPath={undefined}
+    />
+  );
+}
+
 function SearchOlderRowsHarness({
   onLoadOlderRows,
 }: {
@@ -320,6 +351,100 @@ describe("ThreadTimelineRows actions", () => {
     expect(
       latestMessage?.querySelector('[aria-label="Add to chat"]')?.className,
     ).toContain("max-md:pointer-coarse:size-7");
+  });
+
+  it("keeps edit actions available while the thread is active", () => {
+    const onEditMessage = vi.fn();
+    renderWithRouter(
+      <EditActionAvailabilityHarness onEditMessage={onEditMessage} />,
+    );
+    const editButtons = screen.getAllByRole("button", {
+      name: "Edit message",
+    });
+    expect(editButtons).toHaveLength(2);
+    fireEvent.click(editButtons[0]!);
+    expect(onEditMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "earlier_user_message" }),
+    );
+  });
+
+  it("does not offer edit for a steer request", () => {
+    const markup = toMarkup(
+      <ThreadTimelineRows
+        timelineRows={[
+          conversationRow({
+            role: "user",
+            text: "Change direction.",
+            turnRequest: {
+              isGrouped: false,
+              kind: "steer",
+              status: "accepted",
+            },
+          }),
+        ]}
+        onEditMessage={vi.fn()}
+        threadRuntimeDisplayStatus="idle"
+        workspaceRootPath={undefined}
+      />,
+    );
+
+    expect(markup).not.toContain('aria-label="Edit message"');
+  });
+
+  it("does not offer edit for one bubble in a grouped request", () => {
+    const markup = toMarkup(
+      <ThreadTimelineRows
+        timelineRows={[
+          conversationRow({
+            role: "user",
+            text: "One message in a group.",
+            turnRequest: {
+              isGrouped: true,
+              kind: "message",
+              status: "accepted",
+            },
+          }),
+        ]}
+        onEditMessage={vi.fn()}
+        threadRuntimeDisplayStatus="idle"
+        workspaceRootPath={undefined}
+      />,
+    );
+
+    expect(markup).not.toContain('aria-label="Edit message"');
+  });
+
+  it("offers edit for an attachment-only request without requiring add-to-chat", () => {
+    const onEditMessage = vi.fn();
+    renderWithRouter(
+      <ThreadTimelineRows
+        timelineRows={[
+          conversationRow({
+            role: "user",
+            text: "",
+            sourceSeqStart: 11,
+            attachments: {
+              webImages: 0,
+              localImages: 1,
+              localFiles: 0,
+              imageUrls: [],
+              localImagePaths: ["uploads/screenshot.png"],
+              localFilePaths: [],
+            },
+          }),
+        ]}
+        onEditMessage={onEditMessage}
+        threadRuntimeDisplayStatus="idle"
+        workspaceRootPath={undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+    expect(onEditMessage).toHaveBeenCalledWith({
+      messageId: expect.any(String),
+      expectedRequestSequence: 11,
+      input: [{ type: "localImage", path: "uploads/screenshot.png" }],
+    });
   });
 
   it("keeps the last real user action footer inline when a remote-image-only row follows", () => {

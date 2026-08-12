@@ -38,6 +38,12 @@ export const APP_COMMAND_GROUPS: readonly AppCommandGroup[] = [
         "Search threads",
         "Focus the sidebar thread search.",
       ),
+      command("thread.rename", "Rename thread", "Rename the focused thread."),
+      command(
+        "thread.archive",
+        "Archive thread",
+        "Archive the focused thread.",
+      ),
       command(
         "thread.previous",
         "Previous thread",
@@ -153,6 +159,16 @@ export const APP_COMMAND_GROUPS: readonly AppCommandGroup[] = [
         "modelPicker.toggle",
         "Toggle model picker",
         "Open or close the focused composer's model picker.",
+      ),
+      command(
+        "modelPicker.cycleModel",
+        "Next model",
+        "Select the next model of the composer's provider.",
+      ),
+      command(
+        "modelPicker.cycleReasoning",
+        "Next reasoning level",
+        "Select the next reasoning level of the composer's model.",
       ),
     ],
   },

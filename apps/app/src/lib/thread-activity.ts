@@ -1,6 +1,10 @@
 import { assertNever } from "@bb/core-ui";
 import type { Thread, ThreadListEntry, ThreadWithRuntime } from "@bb/domain";
-import { isRunningThreadRuntimeDisplayStatus } from "@/components/thread/timeline";
+// Imported from the defining leaf module, not the timeline barrel: the sidebar
+// thread list reaches this helper before first paint, and the barrel would pull
+// the whole timeline (and @pierre/diffs, Shiki, KaTeX behind it) onto the boot
+// path for one predicate.
+import { isRunningThreadRuntimeDisplayStatus } from "@/components/thread/timeline/thread-runtime-status.js";
 import { isThreadRead } from "@/lib/thread-read-state";
 
 type ThreadStatusShape = Pick<
@@ -43,19 +47,6 @@ export function hasActiveGoalActivity(
   thread: ThreadActivityStateShape,
 ): boolean {
   return thread.activity.activeGoalCount > 0;
-}
-
-export function isBusyThread(
-  thread: ThreadRuntimeShape & ThreadActivityStateShape,
-): boolean {
-  return (
-    isRuntimeBusyThread(thread) ||
-    hasActiveWorkflowActivity(thread) ||
-    hasActiveBackgroundAgentActivity(thread) ||
-    hasActiveBackgroundCommandActivity(thread) ||
-    hasActivePlanModeActivity(thread) ||
-    hasActiveGoalActivity(thread)
-  );
 }
 
 export interface ThreadListIndicatorState {

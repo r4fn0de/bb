@@ -51,6 +51,7 @@ export interface CommandDispatchOptions {
   listModels?: (args: {
     providerId: string;
     acpLaunchSpec?: HostDaemonAcpLaunchSpec;
+    cwd?: string;
   }) => Promise<{
     models: AvailableModel[];
     selectedOnlyModels: AvailableModel[];
@@ -92,7 +93,10 @@ export function isExpectedCommandDispatchError(
   return error instanceof ExpectedCommandDispatchError;
 }
 
-const EXPECTED_ONLINE_RPC_FAILURE_CODES = new Set(["provision_cancelled"]);
+const EXPECTED_ONLINE_RPC_FAILURE_CODES = new Set([
+  "file_too_large",
+  "provision_cancelled",
+]);
 
 export function isExpectedOnlineRpcFailureError(error: unknown): boolean {
   return (
@@ -204,20 +208,6 @@ function isMessageOnlyAcpAuthRequiredError(error: unknown): boolean {
   return (
     error instanceof Error && ACP_AUTH_REQUIRED_PATTERN.test(error.message)
   );
-}
-
-export async function requireExistingEnvironment(
-  environmentId: string,
-  runtimeManager: RuntimeManager,
-): Promise<RuntimeEntry> {
-  const entry = await runtimeManager.getOrAwait(environmentId);
-  if (!entry) {
-    throw new CommandDispatchError(
-      "unknown_environment",
-      `No runtime exists for environment ${environmentId}`,
-    );
-  }
-  return entry;
 }
 
 export async function requireWorkspaceEnvironment(

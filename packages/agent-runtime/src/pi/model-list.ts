@@ -58,6 +58,9 @@ function buildPiAvailableModel(model: PiCatalogModel): AvailableModel {
     id: canonicalId,
     model: canonicalId,
     displayName: model.name,
+    // Pi is the selected agent provider; this is the nested model route that
+    // determines authentication, billing, and where workspace content is sent.
+    routeProviderId: model.provider,
     description: describePiModel(model),
     supportedReasoningEfforts,
     defaultReasoningEffort,
@@ -88,11 +91,23 @@ export function buildPiAvailableModels(
   };
 }
 
+/**
+ * bb identifies a Pi model by `<provider>/<model id>`.
+ *
+ * Aggregator providers such as OpenRouter and the Vercel AI Gateway use model
+ * ids that already contain a slash (`deepseek/deepseek-v4-flash`), so the
+ * provider prefix is always added. Without it,
+ * `openrouter/deepseek/deepseek-v4-flash` collapses to
+ * `deepseek/deepseek-v4-flash`, which names a different provider's model.
+ *
+ * The model id keeps its own slashes, so consumers must split on the FIRST
+ * slash only.
+ */
 export function toCanonicalPiModelId(
   provider: string,
   modelId: string,
 ): string {
-  return modelId.includes("/") ? modelId : `${provider}/${modelId}`;
+  return `${provider}/${modelId}`;
 }
 
 function getPiReasoningEfforts(model: PiCatalogModel): ModelReasoningEffort[] {

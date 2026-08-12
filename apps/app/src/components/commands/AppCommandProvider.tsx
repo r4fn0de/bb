@@ -26,6 +26,7 @@ import {
   formatAppShortcut,
   formatAppShortcutAria,
   isEditableKeyboardTarget,
+  isNativeEditableKeyEvent,
   matchesAppCommandContext,
   type AppShortcutPresentation,
 } from "@/lib/app-keybindings";
@@ -45,6 +46,7 @@ interface AppCommandHandlerRegistration {
 interface AppCommandProviderValue {
   dispatch: (command: AppCommandId, target: EventTarget | null) => boolean;
   getShortcut: (command: AppCommandId) => AppShortcut | null;
+  handleKeyboardEvent: (event: KeyboardEvent) => boolean;
   registerContext: (
     key: AppCommandContextKey,
     source: symbol,
@@ -111,6 +113,10 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
     new Map<AppCommandContextKey, Set<symbol>>(),
   );
   const sequenceRef = useRef(0);
+  // Key events already offered to the handlers, so a second delivery of the
+  // same event is a no-op. Weak so entries drop with the event.
+  const attemptedEventsRef = useRef(new WeakSet<KeyboardEvent>());
+  const clearShortcutHintHoldRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (!showKeyboardHints) return;
@@ -125,6 +131,9 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
       shortcutHintModifierHeldRef.current = false;
       setIsShortcutHintModifierHeld(false);
     };
+    // A widget that dispatches a chord itself stops the event before this
+    // listener sees it, so the dispatcher clears the hint through this ref.
+    clearShortcutHintHoldRef.current = clearModifierHold;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!isShortcutHintModifier(event.key)) {
         if (
@@ -165,6 +174,7 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
     window.addEventListener("blur", handleBlur);
     return () => {
       clearModifierHold();
+      clearShortcutHintHoldRef.current = () => {};
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleBlur);
@@ -266,9 +276,26 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
     [isDesktop, keybindings],
   );
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.repeat) return;
+  // Shared by the window listener below and by focused widgets that own their
+  // own key handling. A widget that consumes keys before they reach the window
+  // — the prompt editor's rich-text keymap is the one in the app — calls this
+  // first so an app chord still runs the app command instead of the widget's
+  // own binding for the same chord.
+  const handleKeyboardEvent = useCallback(
+    (event: KeyboardEvent): boolean => {
+      if (event.defaultPrevented || event.isComposing || event.repeat) {
+        return false;
+      }
+      // Editable controls own semantic navigation and deletion keys. Their
+      // modifiers express native character/word/line/document behavior, so an
+      // app command customized onto the same chord must not preempt them. Other
+      // chords still dispatch before widget keymaps (the #1162 guarantee).
+      if (isNativeEditableKeyEvent(event)) return false;
+      // A widget that dispatched first leaves the event alone when every
+      // handler declines, so the same event still reaches the window listener.
+      // Without this, those handlers would run a second time.
+      if (attemptedEventsRef.current.has(event)) return false;
+      attemptedEventsRef.current.add(event);
       const bindings = keybindingsRef.current;
       let context: AppCommandContext | null = null;
       const isMac = isMacKeyboardPlatform(browserPlatform());
@@ -283,15 +310,24 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
         if (!matchesAppShortcut(event, binding.shortcut, isMac)) continue;
         context ??= currentContext(event.target);
         if (!matchesAppCommandContext(binding, context)) continue;
-        if (!dispatch(binding.command, event.target)) return;
+        if (!dispatch(binding.command, event.target)) return false;
+        clearShortcutHintHoldRef.current();
         event.preventDefault();
         event.stopPropagation();
-        return;
+        return true;
       }
+      return false;
+    },
+    [currentContext, dispatch, isDesktop],
+  );
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      handleKeyboardEvent(event);
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [currentContext, dispatch, isDesktop]);
+  }, [handleKeyboardEvent]);
 
   useEffect(() => {
     const desktop = getBbDesktopInfo();
@@ -308,10 +344,17 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
     () => ({
       dispatch,
       getShortcut,
+      handleKeyboardEvent,
       registerContext,
       registerHandler,
     }),
-    [dispatch, getShortcut, registerContext, registerHandler],
+    [
+      dispatch,
+      getShortcut,
+      handleKeyboardEvent,
+      registerContext,
+      registerHandler,
+    ],
   );
 
   return (
@@ -366,6 +409,22 @@ export function useIndexedAppCommandHandlers(
       unregister.forEach((dispose) => dispose());
     };
   }, [commands, priority, registerHandler]);
+}
+
+/**
+ * Run app keybindings for a key event a focused widget received before the
+ * event reaches the window listener. Returns true when an app command ran, so
+ * the caller can stop its own handling. The event is then marked handled, and
+ * the window listener skips it.
+ */
+export function useAppCommandKeyDispatch(): (event: KeyboardEvent) => boolean {
+  const handleKeyboardEvent = useContext(
+    AppCommandContextValue,
+  )?.handleKeyboardEvent;
+  return useCallback(
+    (event: KeyboardEvent) => handleKeyboardEvent?.(event) ?? false,
+    [handleKeyboardEvent],
+  );
 }
 
 export function useAppCommandContext(

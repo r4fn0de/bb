@@ -65,7 +65,11 @@ describe("scaffoldPlugin bundled types", () => {
     });
     expect(pkg.devDependencies["@bb/plugin-sdk"]).toBeUndefined();
     expect(pkg.devDependencies["@types/react"]).toBeDefined();
-    expect(pkg.devDependencies.zod).toBeDefined();
+    // server.ts imports zod and the build inlines it, so an install that omits
+    // dev deps still has to produce a buildable plugin (see
+    // plugin-scaffold-dependencies.test.ts).
+    expect(pkg.dependencies.zod).toBeDefined();
+    expect(pkg.devDependencies.zod).toBeUndefined();
 
     // No app entry ⇒ no app types.
     await expect(
@@ -105,5 +109,28 @@ describe("scaffoldPlugin bundled types", () => {
     expect(components.registries["@bb"]).toBe(
       "https://raw.githubusercontent.com/get-bb/bb/desktop-v0.9.0/packages/plugin-registry/r/{name}.json",
     );
+  });
+
+  it("uses the canonical id in a scoped package scaffold", async () => {
+    const targetDir = join(workDir, "bb-plugin-scoped");
+    await scaffoldPlugin({
+      targetDir,
+      packageName: "@acme/bb-plugin-scoped",
+      bbVersion: "0.9.0",
+    });
+
+    const pkg = JSON.parse(
+      await readFile(join(targetDir, "package.json"), "utf8"),
+    );
+    expect(pkg.name).toBe("@acme/bb-plugin-scoped");
+    expect(pkg.bb.name).toBe("Scoped");
+
+    const readme = await readFile(join(targetDir, "README.md"), "utf8");
+    expect(readme).toContain("bb plugin reload scoped");
+    expect(readme).toContain("bb plugin config scoped");
+
+    const server = await readFile(join(targetDir, "server.ts"), "utf8");
+    expect(server).toContain("bb plugin config scoped");
+    expect(server).not.toContain("bb plugin config @acme/");
   });
 });

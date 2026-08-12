@@ -21,7 +21,10 @@ import {
   appThemeSelectionSchema,
   experimentsSchema,
 } from "@bb/domain";
-import type { ProviderUsageResponse } from "@bb/host-daemon-contract";
+import type {
+  DiscoverReposResult,
+  ProviderUsageResponse,
+} from "@bb/host-daemon-contract";
 import {
   binaryResponse,
   defineRoute,
@@ -47,6 +50,8 @@ import type {
   CloseTerminalRequest,
   CommandListResponse,
   CopyProjectAttachmentsRequest,
+  ContinueAfterProviderRateLimitRequest,
+  ContinueAfterProviderRateLimitResponse,
   CreateHostJoinCodeRequest,
   CreateHostJoinCodeResponse,
   CreateTerminalRequest,
@@ -55,7 +60,10 @@ import type {
   CreateQueuedMessageRequest,
   CreateThreadSectionRequest,
   CreateThreadRequest,
+  EditMessageRequest,
+  EditMessageResponse,
   ForkThreadRequest,
+  RestartTerminalRequest,
   DeleteThreadSectionRequest,
   DeleteThreadRequest,
   EnvironmentActionApiError,
@@ -146,6 +154,9 @@ import type {
   SystemExecutionOptionsResponse,
   SystemProviderInfo,
   SystemProvidersQuery,
+  OnboardingAgentOverview,
+  OnboardingTelemetryEvent,
+  SystemOnboardingReposQuery,
   SystemUsageLimitsQuery,
   SystemVersionQuery,
   SystemVersionResponse,
@@ -161,7 +172,6 @@ import type {
   TerminalResizeRequest,
   ThreadArchiveAllResponse,
   ThreadChildSummaryResponse,
-  ThreadComposerBootstrapResponse,
   ThreadEventWaitQuery,
   ThreadEventsQuery,
   ThreadSectionMutationResponse,
@@ -176,6 +186,7 @@ import type {
   ThreadOpenResponse,
   ThreadPaneActionRequest,
   ThreadPaneActionResponse,
+  ProviderRateLimitRecoveryStatus,
   ThreadPendingInteractionsResponse,
   ThreadQueuedMessageListResponse,
   ThreadResponse,
@@ -212,10 +223,12 @@ import { updateThreadTabsRequestSchema } from "./api/thread-tabs.js";
 import {
   closeTerminalRequestSchema,
   copyProjectAttachmentsRequestSchema,
+  continueAfterProviderRateLimitRequestSchema,
   createFilePreviewRequestSchema,
   createThreadSectionRequestSchema,
   deleteThreadSectionRequestSchema,
   createTerminalRequestSchema,
+  restartTerminalRequestSchema,
   createProjectRequestSchema,
   createHostJoinCodeRequestSchema,
   createProjectSourceRequestSchema,
@@ -263,10 +276,13 @@ import {
   resolvePendingInteractionRequestSchema,
   respondPluginInteractionRequestSchema,
   sendMessageRequestSchema,
+  editMessageRequestSchema,
   setQueuedMessageGroupBoundaryRequestSchema,
   sendQueuedMessageRequestSchema,
   systemExecutionOptionsQuerySchema,
   systemProvidersQuerySchema,
+  onboardingTelemetryEventSchema,
+  systemOnboardingReposQuerySchema,
   systemUsageLimitsQuerySchema,
   systemVersionQuerySchema,
   threadEventWaitQuerySchema,
@@ -703,6 +719,14 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<TerminalSession>(),
     }),
+    restart: defineRoute({
+      path: "/terminals/:terminalId/restart",
+      method: "post",
+      request: jsonRequest<PathTerminal, RestartTerminalRequest>(
+        restartTerminalRequestSchema,
+      ),
+      response: jsonResponse<TerminalSession>({ status: 201 }),
+    }),
     close: defineRoute({
       path: "/terminals/:terminalId/close",
       method: "post",
@@ -956,12 +980,31 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<{ ok: true }>(),
     }),
-    /** @deprecated App code uses dedicated composer queries. */
-    composerBootstrap: defineRoute({
-      path: "/threads/:id/composer-bootstrap",
+    rateLimitRecovery: defineRoute({
+      path: "/threads/:id/rate-limit-recovery",
       method: "get",
       request: noRequest<PathId>(),
-      response: jsonResponse<ThreadComposerBootstrapResponse>(),
+      response: jsonResponse<ProviderRateLimitRecoveryStatus>(),
+    }),
+    continueAfterRateLimit: defineRoute({
+      path: "/threads/:id/rate-limit-recovery/continue",
+      method: "post",
+      request: jsonRequest<PathId, ContinueAfterProviderRateLimitRequest>(
+        continueAfterProviderRateLimitRequestSchema,
+      ),
+      response: jsonResponse<ContinueAfterProviderRateLimitResponse>(),
+    }),
+    /**
+     * Replace an accepted root user turn and every later turn. A running
+     * thread is stopped and allowed to settle before history is rewritten.
+     */
+    editMessage: defineRoute({
+      path: "/threads/:id/edit-message",
+      method: "post",
+      request: jsonRequest<PathId, EditMessageRequest>(
+        editMessageRequestSchema,
+      ),
+      response: jsonResponse<EditMessageResponse>(),
     }),
     queuedMessages: defineRoute({
       path: "/threads/:id/queued-messages",
@@ -1036,6 +1079,12 @@ export const publicApiRoutes = {
     }),
     stop: defineRoute({
       path: "/threads/:id/stop",
+      method: "post",
+      request: noRequest<PathId>(),
+      response: jsonResponse<{ ok: true }>(),
+    }),
+    compact: defineRoute({
+      path: "/threads/:id/compact",
       method: "post",
       request: noRequest<PathId>(),
       response: jsonResponse<{ ok: true }>(),
@@ -1363,6 +1412,30 @@ export const publicApiRoutes = {
       method: "get",
       request: noRequest<PathId>(),
       response: binaryResponse<Uint8Array>(),
+    }),
+    onboardingEvent: defineRoute({
+      path: "/system/onboarding/event",
+      method: "post",
+      request: jsonRequest<EmptyInput, OnboardingTelemetryEvent>(
+        onboardingTelemetryEventSchema,
+      ),
+      response: jsonResponse<{ ok: true }>(),
+    }),
+    onboardingAgents: defineRoute({
+      path: "/system/onboarding/agents",
+      method: "get",
+      request: optionalQueryRequest<EmptyInput, SystemProvidersQuery>(
+        systemProvidersQuerySchema,
+      ),
+      response: jsonResponse<OnboardingAgentOverview>(),
+    }),
+    onboardingRepos: defineRoute({
+      path: "/system/onboarding/repos",
+      method: "get",
+      request: optionalQueryRequest<EmptyInput, SystemOnboardingReposQuery>(
+        systemOnboardingReposQuerySchema,
+      ),
+      response: jsonResponse<DiscoverReposResult>(),
     }),
     usageLimits: defineRoute({
       path: "/system/usage-limits",

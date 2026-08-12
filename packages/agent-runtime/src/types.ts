@@ -172,6 +172,30 @@ export interface StartThreadResult {
   providerThreadId: string;
 }
 
+export interface PrepareThreadRewindArgs {
+  acpLaunchSpec?: HostDaemonAcpLaunchSpec;
+  environmentId: string;
+  threadId: string;
+  leaseId: string;
+  projectId: string;
+  providerId: string;
+  sourceProviderThreadId: string;
+  retainThroughProviderCheckpoint: string;
+  options: AgentRuntimeExecutionOptions;
+  instructions?: string;
+  dynamicTools?: DynamicTool[];
+  disallowedTools?: readonly string[];
+  instructionMode?: InstructionMode;
+}
+
+export interface PrepareThreadRewindResult {
+  providerThreadId: string;
+}
+
+export interface DiscardThreadRewindArgs {
+  leaseId: string;
+}
+
 export interface ResumeThreadArgs {
   acpLaunchSpec?: HostDaemonAcpLaunchSpec;
   environmentId: string;
@@ -224,6 +248,10 @@ export interface StopThreadArgs {
   threadId: string;
 }
 
+export interface StopThreadResult {
+  providerCheckpointId: string | null;
+}
+
 export interface AgentRuntimeProviderSession {
   providerId: string;
   providerThreadId: string;
@@ -273,12 +301,19 @@ export interface UnarchiveThreadArgs {
 export interface ListModelsArgs {
   providerId: string;
   acpLaunchSpec?: HostDaemonAcpLaunchSpec;
+  cwd?: string;
 }
 
 export interface AgentRuntime {
   ensureProvider(args: EnsureProviderArgs): Promise<void>;
 
   startThread(args: StartThreadArgs): Promise<StartThreadResult>;
+
+  prepareThreadRewind(
+    args: PrepareThreadRewindArgs,
+  ): Promise<PrepareThreadRewindResult>;
+
+  discardThreadRewind(args: DiscardThreadRewindArgs): Promise<void>;
 
   resumeThread(args: ResumeThreadArgs): Promise<ResumeThreadResult>;
 
@@ -292,7 +327,7 @@ export interface AgentRuntime {
    * reports `false` afterwards and the next turn must go through
    * `resumeThread`. The provider process keeps running for other threads.
    */
-  stopThread(args: StopThreadArgs): Promise<void>;
+  stopThread(args: StopThreadArgs): Promise<StopThreadResult>;
 
   clearThreadGoal(args: ClearThreadGoalArgs): Promise<{ cleared: boolean }>;
 
@@ -338,8 +373,8 @@ export interface AgentRuntime {
   /** Whether the runtime currently hosts the thread (turns can run on it). */
   hasThread(threadId: string): boolean;
 
-  /** Thread ids with an active turn. */
-  getActiveThreadIds(): string[];
+  /** Thread ids with an active turn or an accepted turn awaiting its first event. */
+  getLiveThreadIds(): string[];
 
   /**
    * Whether any hosted thread still has an open background task (a workflow or

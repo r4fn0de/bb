@@ -3,6 +3,7 @@ import {
   appCommandIdSchema,
   appShortcutSchema,
   appSettingsSchema,
+  experimentKeySchema,
   experimentsSchema,
   type AppSettings,
   type AppShortcut,
@@ -80,13 +81,14 @@ function updateExperiment(
   value: string,
 ): Experiments {
   const enabled = parseBoolean(value);
-  switch (key) {
-    case "claudeCodeMockCliTraffic":
-    case "toolsHub":
-      return experimentsSchema.parse({ ...experiments, [key]: enabled });
-    default:
-      throw new Error(`Unknown experiment '${key}'.`);
+  const experimentKey = experimentKeySchema.safeParse(key);
+  if (!experimentKey.success) {
+    throw new Error(`Unknown experiment '${key}'.`);
   }
+  return experimentsSchema.parse({
+    ...experiments,
+    [experimentKey.data]: enabled,
+  });
 }
 
 export function registerSettingsCommands(
@@ -126,6 +128,30 @@ export function registerSettingsCommands(
         );
         if (outputJson(opts, result)) return;
         console.log(`${key} updated`);
+      }),
+    );
+
+  settings
+    .command("replay-onboarding")
+    .description("Show the first-run setup guide again on the next app load")
+    .option("--json", "Print machine-readable JSON output")
+    .action(
+      action(async (opts: JsonOptions) => {
+        const sdk = createCliBbSdk(getUrl());
+        const config = await sdk.system.config();
+        let experiments = config.experiments;
+        if (!config.experiments.newOnboarding) {
+          experiments = await sdk.system.updateExperiments({
+            ...config.experiments,
+            newOnboarding: true,
+          });
+        }
+        const generalSettings = await sdk.system.updateGeneralSettings({
+          ...config.generalSettings,
+          onboardingCompletedAt: null,
+        });
+        if (outputJson(opts, { experiments, generalSettings })) return;
+        console.log("New onboarding is enabled; onboarding will show again");
       }),
     );
 

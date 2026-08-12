@@ -16,11 +16,8 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar.js";
-import { AppSidebar } from "@/components/sidebar/AppSidebar";
 import { ThreadTitleMentionResourcesProvider } from "@/components/thread/ThreadTitleMentions";
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
-import { SettingsSidebar } from "@/components/settings/SettingsSidebar";
-import { ToolsSidebar } from "@/components/tools/ToolsSidebar";
 import { ToolsHubExperimentProvider } from "@/components/tools/tools-experiment-context";
 import {
   resolveAutomationBreadcrumbs,
@@ -79,17 +76,22 @@ import { IframeDragGuardOverlay } from "@/lib/iframe-drag-guard";
 import { dispatchBrowserViewBoundsSync } from "@/lib/browser-view-bounds-sync";
 import { useFaviconBadge } from "@/lib/favicon-color-preference";
 import { shouldShowFaviconAttentionDot } from "./faviconAttentionDot";
+import { AppLayoutSidebar } from "./AppLayoutSidebar";
 import {
   useAppCommandHandler,
   useAppCommandShortcut,
 } from "@/components/commands/AppCommandProvider";
 import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
-import { useMobileVisualViewportHeight } from "./useMobileVisualViewportHeight";
+import {
+  shouldRestoreIOSViewportOnKeyboardDismissal,
+  useMobileVisualViewportHeight,
+} from "./useMobileVisualViewportHeight";
 import { wsManager } from "@/lib/ws";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import { findPaneByThread } from "@/lib/split-layout";
 import { applyThreadOpenToLayout } from "@/views/thread-detail/splitThreadNavigation";
 import { useThreadSplitsEnabled } from "@/hooks/useThreadSplitsEnabled";
+import { useSplitWorkspaceActive } from "@/hooks/useSplitWorkspaceActive";
 import { useAppSettingsRouteMemory } from "@/hooks/useAppSettingsRouteMemory";
 import { useSystemConfig } from "@/hooks/queries/system-queries";
 
@@ -400,9 +402,20 @@ export function AppLayout({ children }: AppLayoutProps) {
   const quickCreateProject = useQuickCreateProjectController();
   const isCompactViewport = useIsCompactViewport();
   const threadSplitsEnabled = useThreadSplitsEnabled();
+  const splitWorkspaceActive = useSplitWorkspaceActive();
   const store = useStore();
   const contentShellRef = useRef<HTMLDivElement>(null);
-  useMobileVisualViewportHeight(contentShellRef, isCompactViewport);
+  const providerRef = useRef<HTMLDivElement>(null);
+  const restoreIOSViewportOnKeyboardDismissal = useMemo(
+    () => shouldRestoreIOSViewportOnKeyboardDismissal(navigator),
+    [],
+  );
+  useMobileVisualViewportHeight(
+    contentShellRef,
+    providerRef,
+    isCompactViewport,
+    restoreIOSViewportOnKeyboardDismissal,
+  );
   const location = useLocation();
   const [resourceRouteLabel, setResourceRouteLabel] = useAtom(
     resourceRouteLabelAtom,
@@ -559,15 +572,18 @@ export function AppLayout({ children }: AppLayoutProps) {
     threadDetailBootstrapQuery.isSuccess || threadDetailBootstrapQuery.isError;
   const [sidebarWidth, setSidebarWidth] = useAtom(sidebarWidthAtom);
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
-  const providerRef = useRef<HTMLDivElement>(null);
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
   const liveWidthRef = useRef(sidebarWidth);
   const animationFrameRef = useRef<number | null>(null);
+  // Plugin panel routes hand their header to the split workspace, which draws a
+  // pane header per pane. When the workspace is inactive it draws none, so the
+  // shared header must come back — it reserves the sidebar trigger footprint,
+  // and without it the trigger overlays the panel body.
   const showHeader =
     !isThreadView &&
     !isRootView &&
-    !(threadSplitsEnabled && pluginPanelMatch !== null);
+    !(splitWorkspaceActive && pluginPanelMatch !== null);
   const [desktopInfo] = useState(getBbDesktopInfo);
   const desktopWindowState = useDesktopWindowState();
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
@@ -817,29 +833,21 @@ export function AppLayout({ children }: AppLayoutProps) {
               providerRef={providerRef}
               style={sidebarProviderStyle}
             >
-              {isGlobalSettingsView ? (
-                <SettingsSidebar
-                  onResizeMouseDown={handleResizeMouseDown}
-                  isResizing={isSidebarResizing}
-                  showTopReserve={true}
-                  appRoutePath={appRoutePath}
-                />
-              ) : isGlobalToolsView ? (
-                <ToolsSidebar
-                  onResizeMouseDown={handleResizeMouseDown}
-                  isResizing={isSidebarResizing}
-                  showTopReserve={true}
-                  appRoutePath={toolsBackRoutePath}
-                />
-              ) : (
-                <AppSidebar
-                  onResizeMouseDown={handleResizeMouseDown}
-                  isResizing={isSidebarResizing}
-                  showTopReserve={true}
-                  settingsRoutePath={settingsRoutePath}
-                  toolsRoutePath={toolsHubEnabled ? toolsRoutePath : undefined}
-                />
-              )}
+              <AppLayoutSidebar
+                mode={
+                  isGlobalSettingsView
+                    ? "settings"
+                    : isGlobalToolsView
+                      ? "tools"
+                      : "app"
+                }
+                onResizeMouseDown={handleResizeMouseDown}
+                isResizing={isSidebarResizing}
+                appRoutePath={appRoutePath}
+                settingsRoutePath={settingsRoutePath}
+                toolsBackRoutePath={toolsBackRoutePath}
+                toolsRoutePath={toolsHubEnabled ? toolsRoutePath : undefined}
+              />
               <SidebarInset>
                 <div
                   ref={contentShellRef}

@@ -124,9 +124,14 @@ describe("PluginDetail official catalog lifecycle", () => {
     expect(screen.getByRole("heading", { name: "GitHub" })).toBeTruthy();
     expect(screen.getByText("BB Official")).toBeTruthy();
     expect(screen.getByText("Developer tools")).toBeTruthy();
-    expect(
-      screen.getByText("Browse GitHub issues and pull requests in BB."),
-    ).toBeTruthy();
+    const description = screen.getByText(
+      "Browse GitHub issues and pull requests in BB.",
+    );
+    expect(description.className).not.toContain("max-w-prose");
+    expect(description.className).toContain("max-w-none");
+    expect(description.className).toContain("text-sm");
+    expect(description.className).toContain("leading-relaxed");
+    expect(description.className).toContain("text-muted-foreground");
     expect(screen.queryByText("Capabilities")).toBeNull();
     expect(container.querySelector('[data-icon="Github"]')).not.toBeNull();
 
@@ -259,7 +264,6 @@ describe("PluginDetail official catalog lifecycle", () => {
     expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
 
     expect(container.querySelector('[data-icon="Github"]')).not.toBeNull();
-    expect(container.querySelector('img[src="/bb-mark.svg"]')).toBeNull();
 
     // Uninstall is irreversible, so it sits with the other ownership actions
     // rather than beside the reversible enable toggle.
@@ -482,7 +486,6 @@ describe("PluginDetail official catalog lifecycle", () => {
     );
     expect(icon).not.toBeNull();
     expect(icon?.className).toContain("size-full");
-    expect(container.querySelector('img[src="/bb-mark.svg"]')).toBeNull();
   });
 
   it("shows a disabled Uninstall action for a built-in plugin", async () => {

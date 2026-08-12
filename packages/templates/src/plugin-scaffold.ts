@@ -1,6 +1,14 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { PLUGIN_SDK_VERSION } from "@bb/domain";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, isAbsolute, join, relative } from "node:path";
+import { derivePluginId, PLUGIN_SDK_VERSION } from "@bb/domain";
 import {
   PLUGIN_SDK_APP_DTS,
   PLUGIN_SDK_DTS,
@@ -30,13 +38,160 @@ export interface ScaffoldPluginArgs {
   app?: boolean;
 }
 
-/** "bb-plugin-hello" → "hello" (mirrors the server's id derivation). */
-function pluginIdOf(packageName: string): string {
-  return packageName.replace(/^bb-plugin-/, "");
+/** Arguments for {@link syncPluginTypes}. */
+export interface SyncPluginTypesArgs {
+  /** Plugin root directory (the one holding `package.json`). */
+  rootDir: string;
+  /**
+   * Also refresh the frontend declaration. Callers pass whether the manifest
+   * declares `bb.app`; an existing `bb-plugin-sdk-app.d.ts` refreshes either
+   * way, so a headless read of the manifest never strands a stale copy.
+   */
+  app: boolean;
+  /**
+   * Report what a write would do and touch nothing (`bb plugin types
+   * --check`, CI). Stale or missing files come back as `stale`.
+   */
+  check?: boolean;
+}
+
+/** One declaration file considered by {@link syncPluginTypes}. */
+export interface SyncedPluginTypeFile {
+  /** Path relative to the plugin root, e.g. `types/bb-plugin-sdk.d.ts`. */
+  path: string;
+  /**
+   * `written` when the file was created or its contents changed, `stale` when
+   * a check found it missing or outdated, `unchanged` when it already matches.
+   */
+  outcome: "written" | "unchanged" | "stale";
+}
+
+/**
+ * Write this build's bundled `@bb/plugin-sdk` declarations into a plugin's
+ * `types/` directory, creating it when absent.
+ *
+ * `bb plugin new` seeds these once, but the SDK surface grows with every BB
+ * release, so a copy scaffolded months ago silently under-reports the API.
+ * `bb plugin types`, `bb plugin build`, and `bb plugin dev` all call this so
+ * the local declarations track the bb that is actually running the plugin.
+ * Files are compared before writing, so an already-current plugin reports
+ * `unchanged` and keeps its mtime.
+ */
+export async function syncPluginTypes(
+  args: SyncPluginTypesArgs,
+): Promise<SyncedPluginTypeFile[]> {
+  const { rootDir, app, check = false } = args;
+  const typesDir = join(rootDir, "types");
+  const candidates: { name: string; content: string; optional: boolean }[] = [
+    { name: "bb-plugin-sdk.d.ts", content: PLUGIN_SDK_DTS, optional: false },
+    {
+      name: "bb-plugin-sdk-app.d.ts",
+      content: PLUGIN_SDK_APP_DTS,
+      // Refresh a frontend declaration the plugin already has even when the
+      // caller did not detect bb.app; never create one it never asked for.
+      optional: !app,
+    },
+  ];
+  await assertWritableTypesDir(rootDir, typesDir);
+  const results: SyncedPluginTypeFile[] = [];
+  for (const candidate of candidates) {
+    const filePath = join(typesDir, candidate.name);
+    const relativePath = `types/${candidate.name}`;
+    const existing = await statNoFollow(filePath, relativePath);
+    if (existing !== null && !existing.isFile()) {
+      throw new Error(`${relativePath} is not a regular file`);
+    }
+    const current = existing === null ? null : await readFile(filePath, "utf8");
+    if (current === null && candidate.optional) continue;
+    if (current === candidate.content) {
+      results.push({ path: relativePath, outcome: "unchanged" });
+      continue;
+    }
+    if (check) {
+      results.push({ path: relativePath, outcome: "stale" });
+      continue;
+    }
+    await mkdir(typesDir, { recursive: true });
+    await writeDeclarationAtomically(filePath, relativePath, candidate.content);
+    results.push({ path: relativePath, outcome: "written" });
+  }
+  return results;
+}
+
+/**
+ * `lstat` that never follows the final path component. Returns null when the
+ * path does not exist, and refuses a symbolic link.
+ *
+ * `bb plugin build` and `bb plugin dev` refresh declarations automatically, so
+ * a plugin that ships `types/` — or a declaration inside it — as a link would
+ * otherwise redirect that write onto a file outside the plugin. Building a
+ * plugin does not run its code, so cloning an untrusted plugin and building it
+ * must not write anywhere but that plugin.
+ */
+async function statNoFollow(
+  path: string,
+  label: string,
+): Promise<Awaited<ReturnType<typeof lstat>> | null> {
+  let stats: Awaited<ReturnType<typeof lstat>>;
+  try {
+    stats = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (stats.isSymbolicLink()) {
+    throw new Error(`refusing to write through the symbolic link ${label}`);
+  }
+  return stats;
+}
+
+/**
+ * Reject a `types/` that is a link, is not a directory, or resolves outside
+ * the plugin. Resolving both sides keeps a plugin inside a symlinked checkout
+ * (a bb worktree, for example) working.
+ */
+async function assertWritableTypesDir(
+  rootDir: string,
+  typesDir: string,
+): Promise<void> {
+  const stats = await statNoFollow(typesDir, "types");
+  if (stats === null) return;
+  if (!stats.isDirectory())
+    throw new Error("types exists but is not a directory");
+  const [realRoot, realTypes] = await Promise.all([
+    realpath(rootDir),
+    realpath(typesDir),
+  ]);
+  const rel = relative(realRoot, realTypes);
+  if (rel.length === 0 || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`types resolves outside the plugin (${realTypes})`);
+  }
+}
+
+/**
+ * Write through a temporary regular file and rename it into place, so a
+ * concurrent reader never sees a partial declaration file and the rename
+ * replaces the entry itself rather than following anything at the destination.
+ */
+async function writeDeclarationAtomically(
+  filePath: string,
+  label: string,
+  content: string,
+): Promise<void> {
+  const tempPath = `${filePath}.bb-tmp`;
+  await statNoFollow(tempPath, `${label}.bb-tmp`);
+  await rm(tempPath, { force: true });
+  await writeFile(tempPath, content, { flag: "wx" });
+  try {
+    await rename(tempPath, filePath);
+  } catch (error) {
+    await rm(tempPath, { force: true });
+    throw error;
+  }
 }
 
 function pluginNameOf(packageName: string): string {
-  return pluginIdOf(packageName)
+  return derivePluginId(packageName)
     .split("-")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
@@ -93,7 +248,7 @@ function componentsJsonSource(bbVersion: string): string {
 }
 
 function serverEntrySource(packageName: string): string {
-  const id = pluginIdOf(packageName);
+  const id = derivePluginId(packageName);
   return `// ${packageName} — a BB plugin backend entry.
 //
 // The default export is a factory that receives the plugin API. BB supplies
@@ -159,7 +314,7 @@ export default async function plugin(bb: BbPluginApi) {
 }
 
 function appEntrySource(packageName: string): string {
-  const id = pluginIdOf(packageName);
+  const id = derivePluginId(packageName);
   return `// ${packageName} — a BB plugin frontend entry.
 //
 // Compiled by \`bb plugin build\` into dist/app.js + dist/app.css. React and
@@ -284,7 +439,7 @@ Describe when to use this skill and the steps to follow.
 }
 
 function readmeSource(packageName: string, app: boolean): string {
-  const id = pluginIdOf(packageName);
+  const id = derivePluginId(packageName);
   const componentsSection = app
     ? `
 ## UI components
@@ -322,6 +477,12 @@ ${componentsSection}
   \`.webp\` files.
 - \`engines.bb\` — supported bb app version range.
 - \`engines.bbPluginSdk\` — supported plugin SDK range (scaffold: \`^${PLUGIN_SDK_VERSION}\`).
+- \`dependencies\` — every package your source imports that BB does not provide.
+  \`bb plugin build\` inlines them into \`dist/\`, and git installs resolve this
+  list alone, so a build-required package here rather than in
+  \`devDependencies\` is what keeps your plugin installable. \`devDependencies\`
+  is for types and tooling only (BB shims React, the portal primitives, and
+  \`@bb/plugin-sdk\` at runtime — never bundle them).
 
 Run \`bb plugin build\` before publishing git/npm installs. It writes
 \`dist/server.js\` + \`server.meta.json\` (and, with \`bb.app\`, \`app.js\` /
@@ -331,9 +492,11 @@ Run \`bb plugin build\` before publishing git/npm installs. It writes
 
 ## Install
 
-From this directory:
+From this directory (\`bb plugin new\` already ran the install; a fresh clone
+needs it):
 
 \`\`\`
+npm install
 bb plugin install .
 \`\`\`
 
@@ -355,8 +518,19 @@ bb plugin config ${id} set greeting hi
 \`types/bb-plugin-sdk.d.ts\` (and \`types/bb-plugin-sdk-app.d.ts\` for the
 frontend) are the full, bundled BB plugin API — \`tsconfig.json\` maps
 \`@bb/plugin-sdk\` to them, so your editor and \`tsc\` see real types with no extra
-install. Ask BB to write plugins for you: the \`bb-plugin-authoring\` skill
-documents the whole surface with examples.
+install. They are readable declarations: open them for an exact signature.
+
+The SDK surface grows with every BB release, and these are a copy. Refresh
+them from the BB you are running:
+
+\`\`\`
+bb plugin types          # rewrite types/ from this BB
+bb plugin types --check  # CI: fail when they are out of date
+\`\`\`
+
+\`bb plugin build\` and \`bb plugin dev\` refresh them for you. Ask BB to write
+plugins for you: the \`bb-plugin-authoring\` skill documents the whole surface
+with examples.
 
 Confused by the API, or need something the types don't explain? Clone the BB
 repo and read the source: <https://github.com/get-bb/bb>.
@@ -395,27 +569,37 @@ export async function scaffoldPlugin(args: ScaffoldPluginArgs): Promise<void> {
           server: "./server.ts",
           ...(app ? { app: "./app.tsx" } : {}),
         },
+        // A package belongs here when generated source imports it AND the
+        // build neither externalizes nor shims it — those imports are inlined
+        // into dist/ by esbuild, and load from node_modules for path: installs
+        // (which run server.ts from source). They must survive an install that
+        // omits dev deps: the packaged CLI runs with NODE_ENV=production, and
+        // the server installs git: plugins with an explicit `--omit=dev`.
+        // - zod: `server.ts` imports it and buildPluginServer externalizes only
+        //   @bb/plugin-sdk and better-sqlite3, so it is bundled, not provided.
+        // - starter deps: the vendored components' real runtime deps, bundled
+        //   into dist/app.js (consumers get the prebuilt dist/ and need none).
+        dependencies: {
+          ...(app ? PLUGIN_STARTER_DEPENDENCIES : {}),
+          zod: "^4.3.6",
+        },
         // Typecheck-only. The BbPluginApi/SDK types come from the bundled
         // `.d.ts` in `types/` (tsconfig maps @bb/plugin-sdk to them), so the
-        // package is not needed for normal plugin source. These deps supply the
-        // real npm types the bundle references (zod/hono/better-sqlite3 and
-        // the root contract's React types); BB provides them all at runtime, and
-        // `bb plugin build` never bundles them.
-        // Real runtime deps of the vendored starter components — esbuild
-        // bundles these into dist/app.js, so they must be installed to
-        // build (`npm install` once; authors need npm, consumers get
-        // prebuilt dist/).
-        ...(app ? { dependencies: PLUGIN_STARTER_DEPENDENCIES } : {}),
+        // package is not needed for normal plugin source. These supply the real
+        // npm types those declarations reference (hono/better-sqlite3 and the
+        // root contract's React types) for packages generated source does not
+        // import: BB provides them at runtime and the bundle never inlines
+        // them. An author who imports one directly must promote it above.
         devDependencies: {
           "@types/better-sqlite3": "^7.6.12",
           "@types/node": "^22.0.0",
           // The root SDK declaration also exposes frontend contract types, so
           // React's declarations are required for headless plugin typechecks.
           "@types/react": "^19.0.0",
+          ...(app ? { "@types/react-dom": "^19.0.0" } : {}),
           "better-sqlite3": "^12.0.0",
           hono: "^4.11.9",
           typescript: "^5.7.0",
-          zod: "^4.3.6",
           // Runtime-shimmed by BB (never bundled) — types only.
           ...(app ? PLUGIN_STARTER_TYPE_DEPENDENCIES : {}),
         },
@@ -428,16 +612,12 @@ export async function scaffoldPlugin(args: ScaffoldPluginArgs): Promise<void> {
   await writeFile(join(targetDir, "tsconfig.json"), tsconfigSource(app));
   // Bundled root/app declarations keep normal plugin source self-contained.
   // Tests that use @bb/plugin-sdk/testing install the published package; the
-  // exact root/app paths below intentionally continue to resolve here.
-  const typesDir = join(targetDir, "types");
-  await mkdir(typesDir, { recursive: true });
-  await writeFile(join(typesDir, "bb-plugin-sdk.d.ts"), PLUGIN_SDK_DTS);
+  // exact root/app paths syncPluginTypes writes intentionally keep resolving
+  // here. Seeding through the same function `bb plugin types` uses is what
+  // stops a scaffolded plugin and a refreshed one from ever diverging.
+  await syncPluginTypes({ rootDir: targetDir, app });
   if (app) {
     await writeFile(join(targetDir, "app.tsx"), appEntrySource(packageName));
-    await writeFile(
-      join(typesDir, "bb-plugin-sdk-app.d.ts"),
-      PLUGIN_SDK_APP_DTS,
-    );
     // Vendored starter components (shadcn model — the author owns and edits
     // them) + components.json so `npx shadcn add @bb/<name>` pulls more from
     // the BB registry at the version tag matching this install.

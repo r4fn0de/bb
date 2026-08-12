@@ -240,6 +240,10 @@ function createFakeRuntime(): AgentRuntime {
     async startThread() {
       return { providerThreadId: "provider-thread-app-test" };
     },
+    async prepareThreadRewind() {
+      return { providerThreadId: "provider-thread-rewind-app-test" };
+    },
+    async discardThreadRewind() {},
     async resumeThread() {
       return { providerThreadId: "provider-thread-app-test" };
     },
@@ -247,7 +251,9 @@ function createFakeRuntime(): AgentRuntime {
     async steerTurn() {
       return { status: "steered" };
     },
-    async stopThread() {},
+    async stopThread() {
+      return { providerCheckpointId: null };
+    },
     async clearThreadGoal() {
       return { cleared: true };
     },
@@ -278,7 +284,7 @@ function createFakeRuntime(): AgentRuntime {
     hasThread() {
       return false;
     },
-    getActiveThreadIds() {
+    getLiveThreadIds() {
       return [];
     },
     hasOpenBackgroundWork() {

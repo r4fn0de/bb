@@ -29,7 +29,7 @@ import {
 // Runtime → bridge commands
 // ---------------------------------------------------------------------------
 
-export const acpBridgeAgentCommandSchema = z.object({
+const acpBridgeAgentCommandSchema = z.object({
   command: z.string().min(1),
   args: z.array(z.string()),
   cwd: z.string().min(1).optional(),
@@ -43,9 +43,7 @@ export type AcpBridgeAgentCommand = z.infer<typeof acpBridgeAgentCommandSchema>;
  */
 export const ACP_DEFAULT_MODEL_ID = "acp-default";
 
-export type AcpBridgeReasoningCli = z.infer<
-  typeof acpBridgeReasoningCliSchema
->;
+export type AcpBridgeReasoningCli = z.infer<typeof acpBridgeReasoningCliSchema>;
 
 export type AcpBridgeNativeReasoning = z.infer<
   typeof acpBridgeNativeReasoningSchema
@@ -138,31 +136,30 @@ const acpBridgeSessionParamsSchema = z.object({
   dynamicTools: z.array(dynamicToolSchema).optional(),
 });
 
-export const acpBridgeThreadStartParamsSchema = acpBridgeSessionParamsSchema;
+const acpBridgeThreadStartParamsSchema = acpBridgeSessionParamsSchema;
 export type AcpBridgeThreadStartParams = z.infer<
   typeof acpBridgeThreadStartParamsSchema
 >;
 
-export const acpBridgeThreadResumeParamsSchema =
-  acpBridgeSessionParamsSchema.extend({
-    providerThreadId: z.string().min(1),
-  });
+const acpBridgeThreadResumeParamsSchema = acpBridgeSessionParamsSchema.extend({
+  providerThreadId: z.string().min(1),
+});
 export type AcpBridgeThreadResumeParams = z.infer<
   typeof acpBridgeThreadResumeParamsSchema
 >;
 
-export const acpBridgeTurnStartParamsSchema = z.object({
+const acpBridgeTurnStartParamsSchema = z.object({
   threadId: z.string().min(1),
   input: z.array(promptInputSchema),
 });
 
-export const acpBridgeTurnSteerParamsSchema = z.object({
+const acpBridgeTurnSteerParamsSchema = z.object({
   threadId: z.string().min(1),
   expectedTurnId: z.string().min(1),
   input: z.array(promptInputSchema),
 });
 
-export const acpBridgeThreadStopParamsSchema = z.object({
+const acpBridgeThreadIdParamsSchema = z.object({
   threadId: z.string().min(1),
 });
 
@@ -195,7 +192,11 @@ export const acpBridgeCommandSchema = z.discriminatedUnion("method", [
   }),
   z.object({
     method: z.literal("thread/stop"),
-    params: acpBridgeThreadStopParamsSchema,
+    params: acpBridgeThreadIdParamsSchema,
+  }),
+  z.object({
+    method: z.literal("thread/compact"),
+    params: acpBridgeThreadIdParamsSchema,
   }),
 ]);
 export type AcpBridgeCommand = z.infer<typeof acpBridgeCommandSchema>;
@@ -206,6 +207,8 @@ export type AcpBridgeCommand = z.infer<typeof acpBridgeCommandSchema>;
 
 export const ACP_TURN_STARTED_METHOD = "acp/turn/started";
 export const ACP_TURN_COMPLETED_METHOD = "acp/turn/completed";
+export const ACP_COMPACTION_STARTED_METHOD = "acp/compaction/started";
+export const ACP_COMPACTION_COMPLETED_METHOD = "acp/compaction/completed";
 export const ACP_UPDATE_METHOD = "acp/update";
 export const ACP_FS_WRITE_METHOD = "acp/fs/write";
 export const ACP_WARNING_METHOD = "acp/warning";
@@ -222,6 +225,29 @@ export const acpTurnCompletedNotificationParamsSchema = z
     stopReason: acpStopReasonSchema,
   })
   .passthrough();
+
+export const acpCompactionCompletedNotificationParamsSchema =
+  z.discriminatedUnion("status", [
+    z
+      .object({
+        threadId: z.string().min(1),
+        status: z.literal("completed"),
+      })
+      .passthrough(),
+    z
+      .object({
+        threadId: z.string().min(1),
+        status: z.literal("interrupted"),
+      })
+      .passthrough(),
+    z
+      .object({
+        threadId: z.string().min(1),
+        status: z.literal("failed"),
+        error: z.string().min(1),
+      })
+      .passthrough(),
+  ]);
 
 export const acpUpdateNotificationParamsSchema = z
   .object({

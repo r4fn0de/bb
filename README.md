@@ -11,9 +11,8 @@
 [![npm version](https://img.shields.io/npm/v/bb-app.svg)](https://www.npmjs.com/package/bb-app)
 [![Join Discord](https://img.shields.io/badge/Discord-Join%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/kvBU6tJhcJ)
 
-bb is an agentic IDE that can control itself. You can seamlessly
-orchestrate all of your favorite coding agents together and have them
-programmatically use bb too.
+bb is an agentic IDE that builds itself. It can control, customize, and automate
+itself, laying the groundwork for your own software factory.
 
 Every surface — the desktop app, web app, CLI, and HTTP API — is a first-class
 way to drive bb. Work runs in threads you can follow live, steer at any point,
@@ -103,15 +102,16 @@ sessions, checks dependencies and native modules, starts the source dev server,
 then opens the desktop shell against that dev app. The launcher prints the web
 URL but does not open a browser unless you pass `--open`.
 
-To use the dev app from another machine, for example over Tailscale, run:
+To use the dev app from another machine over Tailscale, run `pnpm dev`, note the
+printed app port, and publish the loopback Vite listener:
 
 ```bash
-pnpm dev
+tailscale serve --bg --https=443 http://127.0.0.1:<app-port>
 ```
 
-Then open `http://<remote-host-or-tailscale-ip>:<app-port>`. Source dev binds
-the browser app to all interfaces and uses the browser host for WebSockets by
-default.
+Then open `https://<machine>.<tailnet>.ts.net`. Source dev binds both the Vite
+app and main server to loopback by default; Vite continues to proxy API and
+WebSocket traffic.
 
 To use the component storybook from another machine, run:
 
@@ -119,8 +119,9 @@ To use the component storybook from another machine, run:
 pnpm storybook
 ```
 
-Ladle also binds to all interfaces and configures its HMR WebSocket to use the
-browser's current host instead of `localhost`.
+Ladle binds to all interfaces and configures its HMR WebSocket to use the
+browser's current host instead of `localhost`. Do not run `pnpm storybook` on an
+untrusted network.
 
 Development behavior is intentionally split:
 
@@ -180,3 +181,40 @@ See [System overview](docs/system-overview.md) for runtime architecture, data mo
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
+
+## Troubleshooting
+
+### `Could not locate the bindings file`
+
+bb uses native add-ons, for example `better-sqlite3` and `@parcel/watcher`. npm
+downloads or builds those binaries in a package install script. If npm does not
+run install scripts, the binaries are absent. bb then stops at startup with this
+error:
+
+```
+Error: Could not locate the bindings file. Tried:
+ → .../node_modules/better-sqlite3/build/better_sqlite3.node
+```
+
+The usual cause is `ignore-scripts=true` in your `~/.npmrc`. Set the
+`npm_config_ignore_scripts` environment variable to let this one command run its
+install scripts:
+
+```bash
+npm_config_ignore_scripts=false npx bb-app@latest
+```
+
+For a permanent install with the same setting, use:
+
+```bash
+npm_config_ignore_scripts=false npm install -g bb-app
+bb-app
+```
+
+The environment variable applies to that one command only. Keep
+`ignore-scripts=true` in your `~/.npmrc` if you want it for security.
+
+The same error has other causes. A Node.js major-version change after the
+install causes it. A copy of `node_modules` from a different operating system,
+CPU architecture, or libc variant also causes it. To recover, install the
+package again, or run `npm rebuild better-sqlite3`.

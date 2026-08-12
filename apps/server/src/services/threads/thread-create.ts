@@ -1,9 +1,8 @@
 import {
   deleteThread,
-  findEnvironmentByHostPath,
+  findProjectEnvironmentByHostPath,
   getEnvironment,
   getThread,
-  hasNonTerminalThreadInEnvironment,
 } from "@bb/db";
 import type {
   ProjectExecutionDefaults,
@@ -17,6 +16,7 @@ import type { BaseBranchSpec, UnmanagedBranchSpec } from "@bb/server-contract";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { COMMAND_TIMEOUT_MS } from "../../constants.js";
 import { ApiError } from "../../errors.js";
+import { unmanagedAttachRefusal } from "./workspace-path-claims.js";
 import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
 import { callHostRetryableOnlineRpc } from "../hosts/online-rpc.js";
 import { requireNonDestroyedHostWithStatus } from "../lib/entity-lookup.js";
@@ -108,6 +108,7 @@ interface DeriveThreadCreateTitleFallbackArgs {
 }
 
 interface ResolveCatalogExecutionDefaultsArgs {
+  cwd?: string;
   executionDefaults: ProjectExecutionDefaults | null;
   hostId: string | null;
   providerId: string;
@@ -131,6 +132,7 @@ async function resolveCatalogExecutionDefaults(
   }
 
   const catalog = await resolveSystemProviderModels(deps, {
+    ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
     hostId: args.hostId,
     providerId: args.providerId,
   });
@@ -218,6 +220,23 @@ function childHostIdForResolvedEnvironment(
       return resolvedEnvironment.hostId;
     case "personal":
       return resolvedEnvironment.hostId;
+  }
+}
+
+function modelCatalogCwdForResolvedEnvironment(
+  resolvedEnvironment: ResolvedStableThreadRequestEnvironment,
+): string | undefined {
+  switch (resolvedEnvironment.type) {
+    case "reuse":
+      return resolvedEnvironment.environment.path ?? undefined;
+    case "host":
+      return (
+        resolvedEnvironment.unmanagedPath ??
+        resolvedEnvironment.localSource?.path ??
+        undefined
+      );
+    case "personal":
+      return undefined;
   }
 }
 
@@ -337,18 +356,20 @@ function requireLiveSourceThread(
   return sourceThread;
 }
 
+/** Returns the host session's data directory, or null when there is no host. */
 async function ensureCreateHostOnline(
   deps: ThreadCreateDeps,
   args: EnsureCreateHostOnlineArgs,
-): Promise<void> {
+): Promise<string | null> {
   const hostId =
     args.resolvedEnvironment.type === "reuse"
       ? args.resolvedEnvironment.environment.hostId
       : args.resolvedEnvironment.hostId;
   if (hostId === null) {
-    return;
+    return null;
   }
-  await ensureHostSessionReadyForWork(deps, { hostId });
+  const session = await ensureHostSessionReadyForWork(deps, { hostId });
+  return session.dataDir;
 }
 
 async function resolveManagedDefaultBaseBranchForCreate(
@@ -383,21 +404,48 @@ async function resolveManagedDefaultBaseBranchForCreate(
   }
 }
 
+interface AssertUnmanagedHostPathIsAttachableArgs {
+  branch: UnmanagedBranchSpec | undefined;
+  dataDir: string | null;
+  hostId: string;
+  path: string;
+  projectId: string;
+}
+
+/**
+ * The environment claim on a path is project-scoped, but the directory is
+ * physical and shared. Guard the two things that scoping cannot: attaching in
+ * place to another project's bb-managed worktree, and rewriting the working
+ * tree while another project works in the same folder.
+ */
+function assertUnmanagedHostPathIsAttachable(
+  deps: ThreadCreateDeps,
+  args: AssertUnmanagedHostPathIsAttachableArgs,
+): void {
+  const refusal = unmanagedAttachRefusal(deps.db, {
+    checksOutBranch: args.branch !== undefined,
+    dataDir: args.dataDir,
+    hostId: args.hostId,
+    path: args.path,
+    projectId: args.projectId,
+  });
+  if (refusal) {
+    throw new ApiError(409, "invalid_request", refusal.message);
+  }
+}
+
 function existingUnmanagedEnvironmentIntentByHostPath(
   deps: ThreadCreateDeps,
   args: ExistingUnmanagedEnvironmentIntentByHostPathArgs,
 ): ExistingUnmanagedEnvironmentIntentResult | null {
-  const existing = findEnvironmentByHostPath(deps.db, args.hostId, args.path);
+  const existing = findProjectEnvironmentByHostPath(
+    deps.db,
+    args.request.projectId,
+    args.hostId,
+    args.path,
+  );
   if (!existing) {
     return null;
-  }
-
-  if (existing.projectId !== args.request.projectId) {
-    throw new ApiError(
-      409,
-      "invalid_request",
-      "Workspace path is already attached to a different project",
-    );
   }
 
   if (!args.branch) {
@@ -423,18 +471,6 @@ function existingUnmanagedEnvironmentIntentByHostPath(
       409,
       "invalid_request",
       `Cannot checkout branch while the workspace environment is in ${existing.status} state`,
-    );
-  }
-
-  if (
-    hasNonTerminalThreadInEnvironment(deps.db, {
-      environmentId: existing.id,
-    })
-  ) {
-    throw new ApiError(
-      409,
-      "invalid_request",
-      "Cannot checkout branch while another thread is using this workspace",
     );
   }
 
@@ -552,6 +588,8 @@ export async function createThreadFromRequest(
   options: {
     /** Provider-facing input when it differs from the persisted start seed. */
     providerInput?: ThreadCreateServiceRequestInput["input"];
+    /** Source environment selected by the public fork route. */
+    forkSourceEnvironmentId?: string;
   } = {},
 ) {
   const project = requirePublicProjectForThreadCreate(
@@ -579,7 +617,7 @@ export async function createThreadFromRequest(
     ...rawRequestInput,
     environment:
       rawRequestInput.environment.type === "project-default"
-        ? resolveProjectDefaultThreadEnvironment(deps, {
+        ? await resolveProjectDefaultThreadEnvironment(deps, {
             projectId: rawRequestInput.projectId,
           })
         : rawRequestInput.environment,
@@ -643,6 +681,15 @@ export async function createThreadFromRequest(
       "originKind requires a sourceThreadId",
     );
   }
+  const forkSourceEnvironmentId =
+    options.forkSourceEnvironmentId ??
+    (originKind === "fork" &&
+    sourceThread !== null &&
+    sourceThread.environmentId !== null &&
+    requestInput.environment.type === "reuse" &&
+    requestInput.environment.environmentId === sourceThread.environmentId
+      ? sourceThread.environmentId
+      : undefined);
   // Provenance coherence + anti-forgery. The validated source/parent thread
   // anchors senderThreadId so a caller cannot claim a start on behalf of an
   // arbitrary or cross-project thread.
@@ -708,7 +755,13 @@ export async function createThreadFromRequest(
       requestedVisibility: requestInput.visibility,
     }),
     environment: resolveCreateThreadEnvironment({
-      parentThread: sourceThread ?? parentThread,
+      // Source-derived forks already resolve their environment before this
+      // call. Applying ordinary child defaults here would turn an isolated
+      // personal fork back into source reuse.
+      parentThread:
+        forkSourceEnvironmentId !== undefined
+          ? null
+          : (sourceThread ?? parentThread),
       projectId: requestInput.projectId,
       requestedEnvironment: requestInput.environment,
     }),
@@ -720,13 +773,19 @@ export async function createThreadFromRequest(
     }),
   };
   const resolvedEnvironment = resolveStableThreadRequestEnvironment(deps, {
+    allowUnmanagedPersonalProjectReuseEnvironmentId: forkSourceEnvironmentId,
     environment: request.environment,
     projectId: request.projectId,
   });
-  await ensureCreateHostOnline(deps, { resolvedEnvironment });
+  const hostDataDir = await ensureCreateHostOnline(deps, {
+    resolvedEnvironment,
+  });
+  const modelCatalogCwd =
+    modelCatalogCwdForResolvedEnvironment(resolvedEnvironment);
   const resolvedExecutionDefaults = await resolveCatalogExecutionDefaults(
     deps,
     {
+      ...(modelCatalogCwd !== undefined ? { cwd: modelCatalogCwd } : {}),
       executionDefaults,
       hostId: childHostIdForResolvedEnvironment(resolvedEnvironment),
       providerId,
@@ -775,6 +834,13 @@ export async function createThreadFromRequest(
             "Validated unmanaged host request is missing a workspace path",
           );
         }
+        assertUnmanagedHostPathIsAttachable(deps, {
+          branch: workspace.branch,
+          dataDir: hostDataDir,
+          hostId,
+          path: resolvedEnvironment.unmanagedPath,
+          projectId: request.projectId,
+        });
         const existingIntent = existingUnmanagedEnvironmentIntentByHostPath(
           deps,
           {

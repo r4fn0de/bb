@@ -20,6 +20,7 @@ import { TerminalSessionLifecycle } from "../../src/services/terminals/terminal-
 import { resolveThreadStorageRootPath } from "../../src/services/threads/thread-storage.js";
 import { createLifecycleDedupers } from "../../src/lifecycle-dedupers.js";
 import type { ServerAppDeps, ServerRuntimeConfig } from "../../src/types.js";
+import { MANAGED_ENVIRONMENT_RETIRE_GRACE_MS } from "../../src/constants.js";
 import type { NotificationHub } from "../../src/ws/hub.js";
 import { NotificationHub as NotificationHubImpl } from "../../src/ws/hub.js";
 import { WatchInterestCoordinator } from "../../src/ws/watch-interests.js";
@@ -46,6 +47,7 @@ export interface RunningTestServer extends TestAppHarness {
 
 export type TestAppHarnessConfigOverrides = Partial<ServerRuntimeConfig> & {
   appVersionService?: AppVersionService;
+  terminalCloseTimeoutMs?: number;
 };
 
 export const testLogger = {
@@ -94,7 +96,8 @@ export function createTestDaemonHostKey(
 export async function createTestAppHarness(
   overrides: TestAppHarnessConfigOverrides = {},
 ): Promise<TestAppHarness> {
-  const { appVersionService, ...configOverrides } = overrides;
+  const { appVersionService, terminalCloseTimeoutMs, ...configOverrides } =
+    overrides;
   const dataDir = await mkdtemp(join(tmpdir(), "bb-server-test-"));
   const db = initDb(":memory:");
   const hub = new NotificationHubImpl();
@@ -130,10 +133,13 @@ export async function createTestAppHarness(
     featureFlags: defaultFeatureFlags,
     hostDaemonPort: 3001,
     inheritedSkillsRootPaths: [],
+    inferenceFallbackModel: "test/mock-fallback-model",
     inferenceModel: "test/mock-model",
     isDevelopment: true,
+    managedEnvironmentRetireGraceMs: MANAGED_ENVIRONMENT_RETIRE_GRACE_MS,
     openAiApiKey: "test-openai-key",
     serverPort: 3334,
+    sharedSkillRoots: { user: [], project: [] },
     threadStorageRootPath: resolveThreadStorageRootPath({
       dataDir,
       env: {},
@@ -144,6 +150,9 @@ export async function createTestAppHarness(
   };
   const terminalSessions = new TerminalSessionLifecycle({
     attachTimeoutMs: 50,
+    ...(terminalCloseTimeoutMs === undefined
+      ? {}
+      : { closeTimeoutMs: terminalCloseTimeoutMs }),
     config,
     db,
     hub,

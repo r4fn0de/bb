@@ -30,8 +30,6 @@ export const SIDEBAR_UNREAD_DOT_CLASS =
 
 export const SIDEBAR_WORKING_STATUS_COLOR_CLASS = "text-muted-foreground/50";
 
-export const SIDEBAR_PLUGIN_WORKING_STATUS_COLOR_CLASS = "text-foreground";
-
 export const SIDEBAR_SUCCESS_STATUS_COLOR_CLASS = "text-success-foreground";
 
 export const SIDEBAR_SUCCESS_STATUS_DOT_CLASS =
@@ -70,7 +68,7 @@ export const SIDEBAR_ROW_STATIC_STATE_CLASS =
   "text-sidebar-foreground/85 dark:text-sidebar-foreground";
 
 export const SIDEBAR_ROW_SELECTED_STATE_CLASS =
-  `${CONTEXT_SELECTION_SURFACE_CLASS} text-sidebar-foreground`;
+  `${CONTEXT_SELECTION_SURFACE_CLASS} bb-sidebar-selected-row text-sidebar-foreground`;
 
 export const SIDEBAR_MORE_ACTION_TRIGGER_CLASS =
   "relative m-1 h-5 w-5 after:absolute after:left-1/2 after:top-1/2 after:h-7 after:w-7 after:-translate-x-1/2 after:-translate-y-1/2 after:content-[''] max-md:pointer-coarse:m-0 max-md:pointer-coarse:h-9 max-md:pointer-coarse:w-9 max-md:pointer-coarse:after:hidden";

@@ -1,12 +1,9 @@
 import { dirname } from "node:path";
 import {
-  createAgentSession,
+  createAgentSessionFromServices,
   createBashToolDefinition,
   defineTool,
-  DefaultResourceLoader,
   SessionManager,
-  SettingsManager,
-  getAgentDir,
   type AgentSession,
   type AgentSessionEvent,
   type BashSpawnHook,
@@ -18,7 +15,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { getPiModelRuntime } from "./model-runtime.js";
+import { createConfiguredPiServices } from "./configured-services.js";
 
 export interface PiSdkSessionOptions {
   cwd: string;
@@ -68,14 +65,18 @@ const PI_TRANSIENT_AUTH_RETRY_DELAY_MS = 250;
 const PI_TRANSIENT_AUTH_MAX_RETRIES = 8;
 
 interface CreateBashToolWithShellEnvOverlayArgs {
+  commandPrefix?: string;
   cwd: string;
   shellEnvOverrides: ShellEnvOverrides;
+  shellPath?: string;
 }
 
 interface BuildSessionCustomToolsArgs {
+  commandPrefix?: string;
   customTools?: ToolDefinition[];
   cwd: string;
   shellEnvOverrides?: ShellEnvOverrides;
+  shellPath?: string;
 }
 
 function assertExclusivePiPromptOverrides(options: PiSdkSessionOptions): void {
@@ -118,7 +119,13 @@ function createBashToolWithShellEnvOverlay(
   // Pi exposes shell env customization through bash spawn options today. This is
   // intentionally bash-only; non-bash tools must not depend on per-thread env in
   // this shared bridge process.
-  return defineTool(createBashToolDefinition(args.cwd, { spawnHook }));
+  return defineTool(
+    createBashToolDefinition(args.cwd, {
+      commandPrefix: args.commandPrefix,
+      shellPath: args.shellPath,
+      spawnHook,
+    }),
+  );
 }
 
 function buildSessionCustomTools(
@@ -128,8 +135,10 @@ function buildSessionCustomTools(
   if (hasShellEnvOverrides(args.shellEnvOverrides)) {
     customTools.push(
       createBashToolWithShellEnvOverlay({
+        commandPrefix: args.commandPrefix,
         cwd: args.cwd,
         shellEnvOverrides: args.shellEnvOverrides,
+        shellPath: args.shellPath,
       }),
     );
   }
@@ -172,6 +181,8 @@ export class PiSdkSession {
   private session: AgentSession | undefined;
   private unsubscribe: (() => void) | undefined;
   private isProcessing = false;
+  private isCompacting = false;
+  private manualCompactionCompletionCount = 0;
   private readonly pendingSteerConsumptions: PendingSteerConsumption[] = [];
   private lastObservedSteeringQueue: string[] = [];
   private autoRetryInProgress = false;
@@ -186,7 +197,11 @@ export class PiSdkSession {
   ) {}
 
   getIsProcessing(): boolean {
-    return this.isProcessing;
+    return this.isProcessing || this.session?.isStreaming === true;
+  }
+
+  getIsCompacting(): boolean {
+    return this.isCompacting;
   }
 
   getSessionStats(): SessionStats | undefined {
@@ -197,52 +212,30 @@ export class PiSdkSession {
     return this.session?.getContextUsage();
   }
 
+  getProviderCheckpointId(): string | undefined {
+    return this.session?.sessionManager.getLeafId() ?? undefined;
+  }
+
   async start(): Promise<void> {
     assertExclusivePiPromptOverrides(this.options);
-
-    const modelRuntime =
-      this.options.modelRuntime ?? (await getPiModelRuntime());
-    const sessionOptions: CreateAgentSessionOptions = {
-      cwd: this.options.cwd,
-      modelRuntime,
-      sessionManager: this.options.sessionFilePath
-        ? SessionManager.open(
-            this.options.sessionFilePath,
-            dirname(this.options.sessionFilePath),
-          )
-        : SessionManager.inMemory(this.options.cwd),
-      settingsManager: SettingsManager.inMemory({
-        compaction: { enabled: true },
-        retry: { enabled: true, maxRetries: 2 },
-      }),
-    };
 
     const appendSystemPrompt = this.options.appendSystemPrompt?.trim();
     const additionalSkillPaths = this.options.additionalSkillPaths ?? [];
 
-    // Pass custom prompt overrides through ResourceLoader. systemPrompt is the
-    // replacement path; appendSystemPrompt layers BB instructions on top of Pi's
-    // normal discovered APPEND_SYSTEM.md prompt. The two are mutually exclusive
-    // in BB's bridge contract and asserted here for direct SDK-session callers.
-    if (
-      this.options.systemPrompt ||
-      appendSystemPrompt ||
-      additionalSkillPaths.length > 0
-    ) {
-      const resourceLoader = new DefaultResourceLoader({
-        cwd: this.options.cwd,
-        agentDir: getAgentDir(),
+    // Pi's service factory reads the global and project settings files. It also
+    // discovers packages, extensions, skills, prompts, themes, context files,
+    // auth, and custom models from the user's normal Pi directories.
+    const services = await createConfiguredPiServices({
+      cwd: this.options.cwd,
+      ...(this.options.modelRuntime
+        ? { modelRuntime: this.options.modelRuntime }
+        : {}),
+      resourceLoaderOptions: {
         ...(additionalSkillPaths.length > 0
           ? { additionalSkillPaths: [...additionalSkillPaths] }
           : {}),
         ...(this.options.systemPrompt
-          ? {
-              systemPrompt: this.options.systemPrompt,
-              noExtensions: true,
-              ...(additionalSkillPaths.length === 0 ? { noSkills: true } : {}),
-              noPromptTemplates: true,
-              noThemes: true,
-            }
+          ? { systemPrompt: this.options.systemPrompt }
           : {}),
         ...(appendSystemPrompt
           ? {
@@ -250,31 +243,54 @@ export class PiSdkSession {
                 buildAppendSystemPromptOverride(appendSystemPrompt),
             }
           : {}),
-      });
-      await resourceLoader.reload();
-      sessionOptions.resourceLoader = resourceLoader;
-    }
+      },
+    });
 
     const configuredModel = resolveConfiguredModel(
-      modelRuntime,
+      services.modelRuntime,
       this.options.model,
     );
-    if (configuredModel) {
-      sessionOptions.model = configuredModel;
-    }
-    if (this.options.thinkingLevel) {
-      sessionOptions.thinkingLevel = this.options.thinkingLevel;
-    }
 
     const customTools = buildSessionCustomTools({
+      commandPrefix: services.settingsManager.getShellCommandPrefix(),
       customTools: this.options.customTools,
       cwd: this.options.cwd,
       shellEnvOverrides: this.options.shellEnvOverrides,
+      shellPath: services.settingsManager.getShellPath(),
     });
-    sessionOptions.customTools = customTools;
 
-    const { session } = await createAgentSession(sessionOptions);
+    const { session } = await createAgentSessionFromServices({
+      services,
+      sessionManager: this.options.sessionFilePath
+        ? SessionManager.open(
+            this.options.sessionFilePath,
+            dirname(this.options.sessionFilePath),
+          )
+        : SessionManager.inMemory(this.options.cwd),
+      ...(configuredModel ? { model: configuredModel } : {}),
+      ...(this.options.thinkingLevel
+        ? { thinkingLevel: this.options.thinkingLevel }
+        : {}),
+      customTools,
+    });
     this.session = session;
+
+    await session.bindExtensions({
+      mode: "rpc",
+      abortHandler: () => {
+        void session.abort();
+      },
+      shutdownHandler: () => {
+        this.onDone();
+      },
+      onError: (error) => {
+        this.onDone(
+          new Error(
+            `Pi extension error (${error.extensionPath}, ${error.event}): ${error.error}`,
+          ),
+        );
+      },
+    });
 
     this.ensureCustomToolsActive();
 
@@ -324,6 +340,31 @@ export class PiSdkSession {
     }
   }
 
+  async compact(): Promise<void> {
+    if (!this.session) {
+      throw new Error("No active Pi SDK session");
+    }
+    if (this.isProcessing || this.session.isStreaming) {
+      throw new Error("Cannot compact context while Pi is processing a turn");
+    }
+    const completionCount = this.manualCompactionCompletionCount;
+    this.isProcessing = true;
+    this.isCompacting = true;
+    try {
+      await this.session.compact();
+    } catch (error) {
+      // Pi emits compaction_end before rejecting for failures that occur after
+      // compaction starts. That event is the authoritative terminal outcome;
+      // only propagate errors for which the SDK emitted no terminal event.
+      if (this.manualCompactionCompletionCount === completionCount) {
+        throw error;
+      }
+    } finally {
+      this.isProcessing = false;
+      this.isCompacting = false;
+    }
+  }
+
   detach(): void {
     this.rejectPendingSteerConsumptions(
       "Pi SDK session detached before steer consumed",
@@ -333,6 +374,7 @@ export class PiSdkSession {
       this.unsubscribe = undefined;
     }
     this.isProcessing = false;
+    this.isCompacting = false;
   }
 
   stop(): void {
@@ -340,23 +382,23 @@ export class PiSdkSession {
       "Pi SDK session stopped before steer consumed",
     );
     this.detach();
-    if (this.session) {
-      this.session.dispose();
-      this.session = undefined;
-    }
+    const session = this.session;
+    this.session = undefined;
+    if (session) void this.disposeSession(session);
   }
 
-  async closeGracefully(timeoutMs: number): Promise<void> {
+  async closeGracefully(timeoutMs: number): Promise<string | undefined> {
     const session = this.session;
     this.rejectPendingSteerConsumptions(
       "Pi SDK session closed before steer consumed",
     );
     this.detach();
     if (!session) {
-      return;
+      return undefined;
     }
 
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let providerCheckpointId: string | undefined;
     const abortCompleted = session.abort().catch(() => undefined);
     const timeoutReached = new Promise<void>((resolve) => {
       timeout = setTimeout(resolve, timeoutMs);
@@ -367,16 +409,35 @@ export class PiSdkSession {
       if (timeout) {
         clearTimeout(timeout);
       }
-      session.dispose();
+      providerCheckpointId = session.sessionManager.getLeafId() ?? undefined;
+      await this.disposeSession(session);
       if (this.session === session) {
         this.session = undefined;
       }
       this.isProcessing = false;
+      this.isCompacting = false;
+    }
+    return providerCheckpointId;
+  }
+
+  private async disposeSession(session: AgentSession): Promise<void> {
+    try {
+      if (session.hasExtensionHandlers("session_shutdown")) {
+        await session.extensionRunner.emit({
+          type: "session_shutdown",
+          reason: "quit",
+        });
+      }
+    } finally {
+      session.dispose();
     }
   }
 
   private trackProcessingState(event: AgentSessionEvent): void {
-    if (event.type === "agent_start") {
+    if (
+      event.type === "agent_start" ||
+      (event.type === "compaction_start" && event.reason === "manual")
+    ) {
       this.isProcessing = true;
     }
     if (event.type === "agent_end" && !event.willRetry) {
@@ -385,6 +446,10 @@ export class PiSdkSession {
       // ready for next input" — NOT session termination. The session stays
       // alive across multiple turns. onDone() is only called on fatal errors
       // (prompt() catch) or explicit stop().
+    }
+    if (event.type === "compaction_end" && event.reason === "manual") {
+      this.manualCompactionCompletionCount += 1;
+      this.isProcessing = false;
     }
   }
 
@@ -614,26 +679,65 @@ export class PiSdkSession {
   }
 }
 
+type PiModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
+
 /**
- * Resolve a model string like "anthropic/claude-sonnet-4-20250514" to a
- * Pi Model object. Returns undefined if the model can't be resolved.
+ * Resolve a model string to a Pi Model object. Returns undefined when no model
+ * is configured, and throws when a configured model does not exist.
+ *
+ * The canonical form is `<provider>/<model id>`, and the model id keeps its own
+ * slashes (`openrouter/deepseek/deepseek-v4-flash`), so the provider comes from
+ * the first segment only.
+ *
+ * The named provider is authoritative. A model reaches exactly the vendor the
+ * user picked, even when that vendor has no credentials, because substituting
+ * another vendor would send workspace content and billing somewhere the user
+ * never chose.
+ *
+ * A bare provider-native model id (`deepseek/deepseek-v4-flash-0731`) resolves
+ * only when the first segment names no provider that serves the rest. CLI and
+ * SDK callers type that form, and selections stored before bb applied the
+ * provider prefix to aggregator models still use it. Two providers can list the
+ * same id. When exactly one matching provider has configured credentials, that
+ * provider is the only usable match. Otherwise, nothing in the string says
+ * which provider was meant, so an ambiguous match is an error rather than a
+ * guess.
  */
 function resolveConfiguredModel(
   modelRuntime: ModelRuntime,
   modelStr: string | undefined,
-): ReturnType<ModelRuntime["getModel"]> | undefined {
+): PiModel | undefined {
   if (!modelStr) {
     return undefined;
   }
 
   const slashIdx = modelStr.indexOf("/");
-  if (slashIdx === -1) {
-    throw new Error(`Failed to resolve Pi model "${modelStr}"`);
+  if (slashIdx > 0) {
+    const prefixed = modelRuntime.getModel(
+      modelStr.slice(0, slashIdx),
+      modelStr.slice(slashIdx + 1),
+    );
+    if (prefixed) {
+      return prefixed;
+    }
   }
 
-  const provider = modelStr.slice(0, slashIdx);
-  const modelId = modelStr.slice(slashIdx + 1);
-  const model = modelRuntime.getModel(provider, modelId);
+  const bare = modelRuntime
+    .getModels()
+    .filter((candidate) => candidate.id === modelStr);
+  if (bare.length > 1) {
+    const authenticated = bare.filter((candidate) =>
+      modelRuntime.hasConfiguredAuth(candidate.provider),
+    );
+    if (authenticated.length === 1) {
+      return authenticated[0];
+    }
+    const providers = bare.map((candidate) => candidate.provider).join(", ");
+    throw new Error(
+      `Ambiguous Pi model "${modelStr}": served by ${providers}. Prefix it with the provider you want.`,
+    );
+  }
+  const model = bare[0];
   if (!model) {
     throw new Error(`Failed to resolve Pi model "${modelStr}"`);
   }

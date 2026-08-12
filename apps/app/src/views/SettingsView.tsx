@@ -175,6 +175,7 @@ export interface GeneralSettingsSectionProps {
   caffeinateAvailable: boolean;
   caffeinateDisabled: boolean;
   caffeinateEnabled: boolean;
+  onReplayOnboarding: () => void;
   desktopBrowserAvailable: boolean;
   onCaffeinateChange: (enabled: boolean) => void;
   navigateToThreadAfterCreate: boolean;
@@ -186,6 +187,7 @@ export interface GeneralSettingsSectionProps {
   openLinksInAppBrowser: boolean;
   rewriteLocalhostLinks: boolean;
   richTextEditing: boolean;
+  replayOnboardingAvailable: boolean;
   steerActiveThreadOnEnter: boolean;
   steerActiveThreadOnEnterDisabled: boolean;
 }
@@ -209,7 +211,11 @@ export interface ExperimentsSettingsSectionProps {
   /** True while the config query hasn't loaded or a toggle write is in flight. */
   disabled: boolean;
   claudeCodeMockCliTrafficEnabled: boolean;
+  editMessagesEnabled: boolean;
+  newOnboardingEnabled: boolean;
   onClaudeCodeMockCliTrafficEnabledChange: (enabled: boolean) => void;
+  onEditMessagesEnabledChange: (enabled: boolean) => void;
+  onNewOnboardingEnabledChange: (enabled: boolean) => void;
   onToolsHubEnabledChange: (enabled: boolean) => void;
   toolsHubEnabled: boolean;
 }
@@ -780,8 +786,10 @@ export function GeneralSettingsSection({
   openLinksInAppBrowser,
   rewriteLocalhostLinks,
   richTextEditing,
+  replayOnboardingAvailable,
   steerActiveThreadOnEnter,
   steerActiveThreadOnEnterDisabled,
+  onReplayOnboarding,
 }: GeneralSettingsSectionProps) {
   return (
     <SettingsSection title="General">
@@ -823,8 +831,36 @@ export function GeneralSettingsSection({
           enabled={rewriteLocalhostLinks}
           onEnabledChange={onRewriteLocalhostLinksChange}
         />
+
+        {replayOnboardingAvailable ? (
+          <ReplayOnboardingSettingsControl onReplay={onReplayOnboarding} />
+        ) : null}
       </div>
     </SettingsSection>
+  );
+}
+
+/**
+ * The parent only shows this control when the new-onboarding experiment is on.
+ * Clearing `onboardingCompletedAt` then reopens the flow on the spot.
+ */
+function ReplayOnboardingSettingsControl({
+  onReplay,
+}: {
+  onReplay: () => void;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div className="min-w-0">
+        <div className="text-sm">Setup guide</div>
+        <p className="mt-0.5 text-xs text-subtle-foreground">
+          Walk through agent detection and adding projects again.
+        </p>
+      </div>
+      <Button variant="outline" size="sm" onClick={onReplay}>
+        Show again
+      </Button>
+    </div>
   );
 }
 
@@ -919,11 +955,17 @@ export function ProviderSettingsSection({
 }
 
 const CLAUDE_CODE_MOCK_CLI_TRAFFIC_EXPERIMENT_LABEL = "Mock CLI Traffic";
+const EDIT_MESSAGES_EXPERIMENT_LABEL = "Edit messages";
+const NEW_ONBOARDING_EXPERIMENT_LABEL = "New onboarding";
 const EXTENSIONS_EXPERIMENT_LABEL = "Extensions";
 export function ExperimentsSettingsSection({
   claudeCodeMockCliTrafficEnabled,
   disabled,
+  editMessagesEnabled,
+  newOnboardingEnabled,
   onClaudeCodeMockCliTrafficEnabledChange,
+  onEditMessagesEnabledChange,
+  onNewOnboardingEnabledChange,
   onToolsHubEnabledChange,
   toolsHubEnabled,
 }: ExperimentsSettingsSectionProps) {
@@ -943,6 +985,30 @@ export function ExperimentsSettingsSection({
             disabled={disabled}
             onCheckedChange={onClaudeCodeMockCliTrafficEnabledChange}
             aria-label={CLAUDE_CODE_MOCK_CLI_TRAFFIC_EXPERIMENT_LABEL}
+          />
+        </SettingsWithControl>
+
+        <SettingsWithControl
+          label={EDIT_MESSAGES_EXPERIMENT_LABEL}
+          description="Edit a sent message and replace the conversation from that point. Workspace changes are kept."
+        >
+          <Switch
+            checked={editMessagesEnabled}
+            disabled={disabled}
+            onCheckedChange={onEditMessagesEnabledChange}
+            aria-label={EDIT_MESSAGES_EXPERIMENT_LABEL}
+          />
+        </SettingsWithControl>
+
+        <SettingsWithControl
+          label={NEW_ONBOARDING_EXPERIMENT_LABEL}
+          description="Enable the new first-run guide for agent setup and project selection."
+        >
+          <Switch
+            checked={newOnboardingEnabled}
+            disabled={disabled}
+            onCheckedChange={onNewOnboardingEnabledChange}
+            aria-label={NEW_ONBOARDING_EXPERIMENT_LABEL}
           />
         </SettingsWithControl>
 
@@ -1114,6 +1180,20 @@ export function SettingsView() {
             claudeCodeMockCliTraffic: enabled,
           })
         }
+        editMessagesEnabled={experiments.editMessages}
+        onEditMessagesEnabledChange={(enabled) =>
+          updateExperimentsMutation.mutate({
+            ...experiments,
+            editMessages: enabled,
+          })
+        }
+        newOnboardingEnabled={experiments.newOnboarding}
+        onNewOnboardingEnabledChange={(enabled) =>
+          updateExperimentsMutation.mutate({
+            ...experiments,
+            newOnboarding: enabled,
+          })
+        }
         onToolsHubEnabledChange={(enabled) =>
           updateExperimentsMutation.mutate({
             ...experiments,
@@ -1146,6 +1226,7 @@ export function SettingsView() {
           openLinksInAppBrowser={openLinksInAppBrowser}
           rewriteLocalhostLinks={rewriteLocalhostLinks}
           richTextEditing={richTextEditing}
+          replayOnboardingAvailable={experiments.newOnboarding}
           steerActiveThreadOnEnter={generalSettings.steerActiveThreadOnEnter}
           steerActiveThreadOnEnterDisabled={
             systemConfigQuery.data === undefined ||
@@ -1159,6 +1240,12 @@ export function SettingsView() {
           }
           onNavigateToThreadAfterCreateChange={setNavigateToThreadAfterCreate}
           onOpenLinksInAppBrowserChange={setOpenLinksInAppBrowser}
+          onReplayOnboarding={() =>
+            updateGeneralSettingsMutation.mutate({
+              ...generalSettings,
+              onboardingCompletedAt: null,
+            })
+          }
           onRewriteLocalhostLinksChange={setRewriteLocalhostLinks}
           onRichTextEditingChange={setRichTextEditing}
           onSteerActiveThreadOnEnterChange={(enabled) =>

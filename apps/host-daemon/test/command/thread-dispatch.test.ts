@@ -964,7 +964,7 @@ describe("thread command dispatch", () => {
     expect(renameResult).toEqual({});
     expect(archiveResult).toEqual({});
     expect(unarchiveResult).toEqual({});
-    expect(stopResult).toEqual({});
+    expect(stopResult).toEqual({ providerCheckpointId: null });
     expect(harness.runtimeState.startedThreadId).toBe("thread-1");
     expect(harness.runtimeState.startedInstructions).toBe(
       "Be a helpful coding agent.",
@@ -1030,7 +1030,7 @@ describe("thread command dispatch", () => {
       harness.dispatchOptions(),
     );
 
-    expect(stopResult).toEqual({});
+    expect(stopResult).toEqual({ providerCheckpointId: null });
     expect(harness.runtimeState.stoppedThreadId).toBe("thread-stop");
     expect(harness.runtime.hasThread("thread-stop")).toBe(false);
 
@@ -1045,7 +1045,7 @@ describe("thread command dispatch", () => {
         },
         harness.dispatchOptions(),
       ),
-    ).resolves.toEqual({});
+    ).resolves.toEqual({ providerCheckpointId: null });
     expect(harness.runtimeState.stoppedThreadId).toBeUndefined();
   });
 
@@ -1767,7 +1767,11 @@ describe("thread command dispatch", () => {
     const harness = createHarness();
     const acpLaunchSpec = customAcpLaunchSpec();
     let capturedListModelsArgs:
-      | { providerId: string; acpLaunchSpec?: HostDaemonAcpLaunchSpec }
+      | {
+          providerId: string;
+          acpLaunchSpec?: HostDaemonAcpLaunchSpec;
+          cwd?: string;
+        }
       | undefined;
 
     const result = await dispatchOnlineRpcCommand(
@@ -1775,6 +1779,7 @@ describe("thread command dispatch", () => {
         type: "provider.list_models",
         providerId: "fake",
         acpLaunchSpec,
+        cwd: "/tmp/worktree",
       },
       {
         ...harness.dispatchOptions(),
@@ -1811,6 +1816,7 @@ describe("thread command dispatch", () => {
     expect(capturedListModelsArgs).toEqual({
       providerId: "fake",
       acpLaunchSpec,
+      cwd: "/tmp/worktree",
     });
     expect(result).toEqual({
       models: [

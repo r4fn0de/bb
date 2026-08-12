@@ -11,7 +11,7 @@ import { z } from "zod";
 // Content blocks
 // ---------------------------------------------------------------------------
 
-export const acpTextContentBlockSchema = z
+const acpTextContentBlockSchema = z
   .object({
     type: z.literal("text"),
     text: z.string(),
@@ -25,7 +25,7 @@ const acpOtherContentBlockSchema = z
   })
   .passthrough();
 
-export const acpContentBlockSchema = z.union([
+const acpContentBlockSchema = z.union([
   acpTextContentBlockSchema,
   acpOtherContentBlockSchema,
 ]);
@@ -58,7 +58,7 @@ export const acpToolKindSchema = z.enum([
 ]);
 export type AcpToolKind = z.infer<typeof acpToolKindSchema>;
 
-export const acpToolCallStatusSchema = z.enum([
+const acpToolCallStatusSchema = z.enum([
   "pending",
   "in_progress",
   "completed",
@@ -66,7 +66,7 @@ export const acpToolCallStatusSchema = z.enum([
 ]);
 export type AcpToolCallStatus = z.infer<typeof acpToolCallStatusSchema>;
 
-export const acpToolCallContentSchema = z.union([
+const acpToolCallContentSchema = z.union([
   z
     .object({
       type: z.literal("content"),
@@ -90,7 +90,7 @@ export const acpToolCallContentSchema = z.union([
 ]);
 export type AcpToolCallContent = z.infer<typeof acpToolCallContentSchema>;
 
-export const acpToolCallLocationSchema = z
+const acpToolCallLocationSchema = z
   .object({
     path: z.string(),
     line: z.number().optional().nullable(),
@@ -135,7 +135,7 @@ export type AcpToolCallUpdateEvent = z.infer<
   typeof acpToolCallUpdateEventSchema
 >;
 
-export const acpPlanEntryStatusSchema = z.enum([
+const acpPlanEntryStatusSchema = z.enum([
   "pending",
   "in_progress",
   "completed",
@@ -155,6 +155,15 @@ export const acpPlanUpdateSchema = z
   })
   .passthrough();
 
+export const acpUsageUpdateSchema = z
+  .object({
+    sessionUpdate: z.literal("usage_update"),
+    used: z.number().int().nonnegative(),
+    size: z.number().int().nonnegative(),
+  })
+  .passthrough();
+export type AcpUsageUpdate = z.infer<typeof acpUsageUpdateSchema>;
+
 const acpOtherSessionUpdateSchema = z
   .object({
     sessionUpdate: z.string(),
@@ -166,6 +175,7 @@ export const acpSessionUpdateSchema = z.union([
   acpAgentThoughtChunkUpdateSchema,
   acpToolCallUpdateEventSchema,
   acpPlanUpdateSchema,
+  acpUsageUpdateSchema,
   acpOtherSessionUpdateSchema,
 ]);
 export type AcpSessionUpdate = z.infer<typeof acpSessionUpdateSchema>;
@@ -205,40 +215,51 @@ export const acpInitializeResultSchema = z
   .passthrough();
 export type AcpInitializeResult = z.infer<typeof acpInitializeResultSchema>;
 
-export const acpConfigOptionSelectOptionSchema = z
+/**
+ * Some ACP agents serialize an absent optional string as an explicit `null`
+ * instead of omitting the key — pi-acp does this for every model and
+ * config-option `description`. Accept both forms and normalize to `undefined`
+ * so downstream code sees a single shape.
+ */
+const acpOptionalString = z
+  .union([z.string(), z.null()])
+  .transform((value) => value ?? undefined)
+  .optional();
+
+const acpConfigOptionSelectOptionSchema = z
   .object({
     value: z.string(),
-    name: z.string().optional(),
+    name: acpOptionalString,
   })
   .passthrough();
 export type AcpConfigOptionSelectOption = z.infer<
   typeof acpConfigOptionSelectOptionSchema
 >;
 
-export const acpConfigOptionSchema = z
+const acpConfigOptionSchema = z
   .object({
     id: z.string(),
-    name: z.string().optional(),
-    category: z.string().optional(),
+    name: acpOptionalString,
+    category: acpOptionalString,
     type: z.string(),
-    currentValue: z.string().optional(),
+    currentValue: acpOptionalString,
     options: z.array(acpConfigOptionSelectOptionSchema).optional(),
   })
   .passthrough();
 export type AcpConfigOption = z.infer<typeof acpConfigOptionSchema>;
 
-export const acpSessionModelSchema = z
+const acpSessionModelSchema = z
   .object({
     modelId: z.string(),
-    name: z.string().optional(),
-    description: z.string().optional(),
+    name: acpOptionalString,
+    description: acpOptionalString,
   })
   .passthrough();
 export type AcpSessionModel = z.infer<typeof acpSessionModelSchema>;
 
-export const acpSessionModelsSchema = z
+const acpSessionModelsSchema = z
   .object({
-    currentModelId: z.string().optional(),
+    currentModelId: acpOptionalString,
     availableModels: z.array(acpSessionModelSchema).optional(),
   })
   .passthrough();
@@ -248,7 +269,7 @@ const acpLooseConfigOptionSchema = z
   .object({
     id: z.string().optional(),
     name: z.unknown().optional(),
-    category: z.string().optional(),
+    category: acpOptionalString,
     type: z.unknown().optional(),
     currentValue: z.unknown().optional(),
     options: z.unknown().optional(),
@@ -351,7 +372,7 @@ export const acpPromptResultSchema = z
 // Client-bound requests (agent → client)
 // ---------------------------------------------------------------------------
 
-export const acpPermissionOptionKindSchema = z.enum([
+const acpPermissionOptionKindSchema = z.enum([
   "allow_once",
   "allow_always",
   "reject_once",

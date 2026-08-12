@@ -8,11 +8,6 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
-    "./capture": {
-      "source": "./src/capture.ts",
-      "types": "./src/capture.ts",
-      "default": "./src/capture.ts"
-    },
     "./shared/json-rpc-envelope": {
       "source": "./src/shared/json-rpc-envelope.ts",
       "types": "./src/shared/json-rpc-envelope.ts",
@@ -40,8 +35,8 @@
     "@bb/host-daemon-contract": "workspace:*",
     "@bb/process-utils": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@earendil-works/pi-ai": "^0.82.0",
-    "@earendil-works/pi-coding-agent": "^0.82.0",
+    "@earendil-works/pi-ai": "0.84.0",
+    "@earendil-works/pi-coding-agent": "0.84.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

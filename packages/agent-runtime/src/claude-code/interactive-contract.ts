@@ -6,13 +6,38 @@ import {
 import type {
   PendingInteractionGrantedPermissionProfile,
   PendingInteractionGrantablePermissionProfile,
+  RuntimePermissionPolicy,
 } from "@bb/domain";
-import type { ResolvedAdapterPermissionPolicy } from "../shared/permission-policy.js";
 
 export const CLAUDE_PERMISSION_REQUEST_APPROVAL_METHOD =
   "item/permissions/requestApproval";
 export const CLAUDE_USER_QUESTION_TOOL_NAME = "AskUserQuestion";
 export const CLAUDE_USER_QUESTION_REQUEST_METHOD = "item/userQuestion/request";
+export const CLAUDE_EXIT_PLAN_MODE_TOOL_NAME = "ExitPlanMode";
+
+// Claude calls ExitPlanMode with no blockedPath, no decisionReason and no
+// permission suggestions, so the generic approval gate reads it as a request
+// that needs no user decision and allows it. Plan mode then ends and the SDK
+// tells the model the user approved a plan the user never saw. The tool needs
+// its own branch, above every auto-allow, for the same reason AskUserQuestion
+// does: the tool call *is* the prompt, not a guard on one.
+export const claudeExitPlanModeInputSchema = z.object({
+  plan: z.string().min(1),
+  planFilePath: z.string().min(1).optional(),
+});
+export type ClaudeExitPlanModeInput = z.infer<
+  typeof claudeExitPlanModeInputSchema
+>;
+
+/**
+ * Sent back to the model when the user rejects a plan. The turn stays open and
+ * the session stays in plan mode, so the message has to stop the model from
+ * proposing the same plan again in a loop. It points at AskUserQuestion because
+ * that is the one channel bb can show the user mid-turn.
+ */
+export function buildClaudePlanRejectionMessage(): string {
+  return "The user rejected this plan. Do not call ExitPlanMode again with the same plan. Use AskUserQuestion to find out what they want changed, revise the plan, and only then propose it again.";
+}
 
 export const claudePermissionModeSchema = z.enum([
   "default",
@@ -25,7 +50,7 @@ export const claudePermissionModeSchema = z.enum([
 export type ClaudePermissionMode = z.infer<typeof claudePermissionModeSchema>;
 
 export function toClaudePermissionMode(
-  policy: ResolvedAdapterPermissionPolicy,
+  policy: RuntimePermissionPolicy,
 ): ClaudePermissionMode {
   switch (policy.permissionMode) {
     case "accept-edits":
@@ -42,7 +67,9 @@ const claudePermissionRuleValueSchema = z.object({
   ruleContent: z.string().optional(),
 });
 
-export const claudePermissionUpdateSchema = z.discriminatedUnion("type", [
+// Updates bb sends back to Claude. bb never writes a user's settings files, so
+// an outgoing update is always scoped to the session.
+const claudePermissionUpdateSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("addRules"),
     rules: z.array(claudePermissionRuleValueSchema).min(1),
@@ -57,6 +84,40 @@ export const claudePermissionUpdateSchema = z.discriminatedUnion("type", [
 ]);
 export type ClaudePermissionUpdate = z.infer<
   typeof claudePermissionUpdateSchema
+>;
+
+// Suggestions Claude sends to bb. Claude picks the destination it would use for
+// its own prompt, and that is frequently not "session": the sandbox network
+// prompt suggests a "localSettings" rule. The destination describes where Claude
+// would persist the grant, not what the grant covers, so bb accepts every
+// destination here and re-scopes its answer to the session above. Dropping a
+// suggestion costs the prompt its grant and leaves the user unable to allow it.
+const claudePermissionUpdateDestinationSchema = z.enum([
+  "userSettings",
+  "projectSettings",
+  "localSettings",
+  "session",
+  "cliArg",
+]);
+
+export const claudeSuggestedPermissionUpdateSchema = z.discriminatedUnion(
+  "type",
+  [
+    z.object({
+      type: z.literal("addRules"),
+      rules: z.array(claudePermissionRuleValueSchema).min(1),
+      behavior: z.literal("allow"),
+      destination: claudePermissionUpdateDestinationSchema,
+    }),
+    z.object({
+      type: z.literal("addDirectories"),
+      directories: z.array(z.string()).min(1),
+      destination: claudePermissionUpdateDestinationSchema,
+    }),
+  ],
+);
+export type ClaudeSuggestedPermissionUpdate = z.infer<
+  typeof claudeSuggestedPermissionUpdateSchema
 >;
 
 const claudeNetworkPermissionsInputSchema = z.object({
@@ -81,7 +142,7 @@ const claudeRequestedPermissionProfileInputSchema = z
   );
 interface ClaudePermissionRequestProfileArgs {
   blockedPath: string | undefined;
-  suggestions: ClaudePermissionUpdate[] | undefined;
+  suggestions: ClaudeSuggestedPermissionUpdate[] | undefined;
   toolName: string;
 }
 
@@ -102,7 +163,16 @@ const CLAUDE_FILE_PERMISSION_KIND_BY_TOOL_NAME = new Map<
   ["Bash", "read_write"],
 ]);
 
-const CLAUDE_NETWORK_PERMISSION_TOOL_NAMES = new Set(["WebFetch", "WebSearch"]);
+// Claude asks with this pseudo tool when a sandboxed command opens an outbound
+// connection. It carries no file path, so the tool name is the only signal that
+// the prompt grants network access.
+export const CLAUDE_SANDBOX_NETWORK_TOOL_NAME = "SandboxNetworkAccess";
+
+const CLAUDE_NETWORK_PERMISSION_TOOL_NAMES = new Set([
+  "WebFetch",
+  "WebSearch",
+  CLAUDE_SANDBOX_NETWORK_TOOL_NAME,
+]);
 
 function getClaudeFilePermissionKind(
   toolName: string,
@@ -115,7 +185,7 @@ export function isClaudeConcreteFileChangeToolName(toolName: string): boolean {
 }
 
 function getSuggestedDirectories(
-  suggestions: ClaudePermissionUpdate[] | undefined,
+  suggestions: ClaudeSuggestedPermissionUpdate[] | undefined,
 ): string[] {
   return (suggestions ?? []).flatMap((suggestion) =>
     suggestion.type === "addDirectories" ? suggestion.directories : [],
@@ -173,7 +243,7 @@ export function toPendingInteractionPermissionProfile(
 interface ShouldRequestClaudePermissionApprovalArgs {
   blockedPath: string | undefined;
   decisionReason: string | undefined;
-  suggestions: ClaudePermissionUpdate[] | undefined;
+  suggestions: ClaudeSuggestedPermissionUpdate[] | undefined;
   toolName: string;
 }
 
@@ -201,13 +271,13 @@ export type ClaudePermissionRequestApprovalParams = z.infer<
   typeof claudePermissionRequestApprovalParamsSchema
 >;
 
-export const claudeUserQuestionOptionSchema = z.object({
+const claudeUserQuestionOptionSchema = z.object({
   label: z.string().min(1),
   description: z.string().min(1),
   preview: z.string().optional(),
 });
 
-export const claudeUserQuestionSchema = z.object({
+const claudeUserQuestionSchema = z.object({
   question: z.string().min(1),
   header: z.string().min(1),
   options: z
@@ -260,7 +330,7 @@ const claudeUserQuestionAnnotationSchema = z.object({
   notes: z.string().optional(),
 });
 
-export const claudeUserQuestionOutputSchema = z.object({
+const claudeUserQuestionOutputSchema = z.object({
   questions: claudeUserQuestionListSchema,
   answers: z.record(z.string().min(1), z.string().min(1)),
   annotations: z
